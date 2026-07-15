@@ -239,6 +239,17 @@ func readTurn(r *bufio.Reader, onEvent func(contracts.BackendEvent)) (turnResult
 		if len(line) > 0 {
 			var msg map[string]any
 			if json.Unmarshal(line, &msg) == nil {
+				if rpcErr, ok := msg["error"].(map[string]any); ok {
+					tr.IsError = true
+					tr.ErrMsg, _ = rpcErr["message"].(string)
+					if tr.ErrMsg == "" {
+						tr.ErrMsg = "Codex rejected the turn"
+					}
+					if onEvent != nil {
+						onEvent(contracts.BackendEvent{Kind: "result", IsError: true})
+					}
+					return tr, nil
+				}
 				handleAppEvent(msg, &tr, &text, onEvent)
 			}
 			if tr.IsError || tr.ThreadID == "__completed__" {
@@ -270,12 +281,12 @@ func handleAppEvent(msg map[string]any, tr *turnResult, text *strings.Builder, o
 	case "item/started", "item/completed":
 		item, _ := params["item"].(map[string]any)
 		typ, _ := item["type"].(string)
-		if typ == "agent_message" {
+		if typ == "agentMessage" || typ == "agent_message" {
 			if v, ok := item["text"].(string); ok && v != "" {
 				tr.Text = v
 			}
 		}
-		if typ == "command_execution" {
+		if typ == "commandExecution" || typ == "command_execution" {
 			cmd, _ := item["command"].(string)
 			if onEvent != nil && cmd != "" {
 				onEvent(contracts.BackendEvent{Kind: "tool", Tool: "command", Detail: cmd})

@@ -91,7 +91,7 @@ func parseExecOutput(out string) string {
 				Text string `json:"text"`
 			} `json:"item"`
 		}
-		if json.Unmarshal([]byte(line), &ev) == nil && ev.Item.Type == "agent_message" && ev.Item.Text != "" {
+		if json.Unmarshal([]byte(line), &ev) == nil && (ev.Item.Type == "agentMessage" || ev.Item.Type == "agent_message") && ev.Item.Text != "" {
 			return ev.Item.Text
 		}
 		if !strings.HasPrefix(line, "{") {

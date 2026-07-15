@@ -19,8 +19,12 @@ type Config struct {
     Model  string
     Effort string
     Dir    string
+    Verbose bool
 }
 ```
+
+`Verbose` conserve la compatibilité de configuration avec les backends
+Herrscher ; le processus app-server écrit déjà ses diagnostics sur stderr.
 
 ## Modes
 
@@ -40,6 +44,12 @@ Le mode `oneshot` exécute `codex exec --json` à chaque message. Il conserve le
 variables `DCTL_MSG`, `DCTL_AUTHOR`, `DCTL_MESSAGE_ID`, `DCTL_CHANNEL` et
 `DCTL_ATTACHMENTS` pour les intégrations qui en ont besoin.
 
+Le parser accepte les types d’items du protocole app-server (`agentMessage` et
+`commandExecution`) et ignore les notifications inconnues pour rester compatible
+avec les versions futures du CLI. Les presets de modèles sont une liste
+curatée : pour les modèles disponibles dans une installation donnée, vérifier
+`codex debug models`.
+
 ## Enregistrement
 
 Un blank import auto-enregistre le plugin avec `Kind: "codex"`. Les réglages
@@ -58,6 +68,9 @@ GOWORK=off go build ./...
 GOWORK=off go vet ./...
 GOWORK=off go test ./...
 ```
+
+La CI GitHub exécute les mêmes contrôles sans `GOWORK=off`, car ce dépôt est un
+module Go autonome.
 
 Le test live persistant est ignoré par défaut. Pour l’exécuter avec une
 installation Codex authentifiée :

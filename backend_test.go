@@ -41,6 +41,13 @@ func TestParseExecOutput(t *testing.T) {
 	}
 }
 
+func TestParseExecOutputUsesCodexAgentMessageType(t *testing.T) {
+	out := "{\"type\":\"item.completed\",\"item\":{\"type\":\"agentMessage\",\"text\":\"actual Codex response\"}}\n"
+	if got := parseExecOutput(out); got != "actual Codex response" {
+		t.Fatalf("output=%q", got)
+	}
+}
+
 func mustBackend(t *testing.T, c Config) contracts.Backend {
 	t.Helper()
 	b, err := NewBackend(context.Background(), c)

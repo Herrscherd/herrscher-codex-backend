@@ -35,12 +35,39 @@ func TestReadTurnMapsCodexEvents(t *testing.T) {
 	}
 }
 
+func TestReadTurnMapsCodexCamelCaseItems(t *testing.T) {
+	lines := strings.Join([]string{
+		`{"method":"item/started","params":{"item":{"type":"commandExecution","command":"go test ./..."}}}`,
+		`{"method":"item/completed","params":{"item":{"type":"agentMessage","text":"response without delta"}}}`,
+		`{"method":"turn/completed","params":{"turn":{"status":"completed"}}}`,
+	}, "\n") + "\n"
+	var got []contracts.BackendEvent
+	tr, err := readTurn(bufio.NewReader(strings.NewReader(lines)), func(e contracts.BackendEvent) { got = append(got, e) })
+	if err != nil || tr.Text != "response without delta" {
+		t.Fatalf("turn=%+v err=%v", tr, err)
+	}
+	if len(got) != 2 || got[0].Kind != "tool" || got[1].Kind != "result" {
+		t.Fatalf("events=%+v", got)
+	}
+}
+
 func TestReadTurnHandlesHugeLine(t *testing.T) {
 	huge := strings.Repeat("x", 200_000)
 	input := `{"method":"item/agentMessage/delta","params":{"delta":"` + huge + `"}}` + "\n" +
 		`{"method":"turn/completed","params":{"turn":{"status":"completed"}}}` + "\n"
 	if _, err := readTurn(bufio.NewReader(strings.NewReader(input)), nil); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestReadTurnReturnsJSONRPCError(t *testing.T) {
+	input := `{"id":3,"error":{"message":"turn rejected"}}` + "\n"
+	tr, err := readTurn(bufio.NewReader(strings.NewReader(input)), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !tr.IsError || tr.ErrMsg != "turn rejected" {
+		t.Fatalf("turn=%+v", tr)
 	}
 }
 
