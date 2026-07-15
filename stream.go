@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -28,6 +29,7 @@ type streamResponder struct {
 	ctx                context.Context
 	base               []string
 	model, effort, dir string
+	verbose            bool
 	mu                 sync.Mutex
 	sess               *appSession
 }
@@ -36,26 +38,29 @@ func (r *streamResponder) Respond(ctx context.Context, p contracts.Prompt, onEve
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.sess == nil {
-		s, err := startAppSession(r.ctx, r.base, r.model, r.effort, r.dir, "")
+		s, err := startAppSession(r.ctx, r.base, r.model, r.effort, r.dir, r.verbose, "")
 		if err != nil {
 			return "", err
 		}
 		r.sess = s
 	}
 	content := withContext(p.Context, withAttachments(p.Content, p.Attachments))
-	tr, err := r.sess.Send(content, onEvent)
+	tr, err := r.sess.Send(ctx, content, onEvent)
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return "", err
+		}
 		if onEvent != nil {
 			onEvent(contracts.BackendEvent{Kind: "reset"})
 		}
 		resume := r.sess.threadID
 		_ = r.sess.Close()
-		s, startErr := startAppSession(r.ctx, r.base, r.model, r.effort, r.dir, resume)
+		s, startErr := startAppSession(r.ctx, r.base, r.model, r.effort, r.dir, r.verbose, resume)
 		if startErr != nil {
 			return "", startErr
 		}
 		r.sess = s
-		tr, err = r.sess.Send(content, onEvent)
+		tr, err = r.sess.Send(ctx, content, onEvent)
 		if err != nil {
 			return "", err
 		}
@@ -96,6 +101,7 @@ type appSession struct {
 	mu                 sync.Mutex
 	stdin              io.WriteCloser
 	out                *bufio.Reader
+	outClose           io.Closer
 	cmd                *exec.Cmd
 	threadID           string
 	model, effort, dir string
@@ -103,7 +109,11 @@ type appSession struct {
 }
 
 func newAppSession(stdin io.WriteCloser, out io.Reader) *appSession {
-	return &appSession{stdin: stdin, out: bufio.NewReader(out), nextID: 1}
+	s := &appSession{stdin: stdin, out: bufio.NewReader(out), nextID: 1}
+	if c, ok := out.(io.Closer); ok {
+		s.outClose = c
+	}
+	return s
 }
 
 func initializeRequest(id int) map[string]any {
@@ -191,12 +201,16 @@ func (s *appSession) initialize(resume string) error {
 	return nil
 }
 
-func startAppSession(ctx context.Context, base []string, model, effort, dir, resume string) (*appSession, error) {
+func startAppSession(ctx context.Context, base []string, model, effort, dir string, verbose bool, resume string) (*appSession, error) {
 	argv := appServerArgv(base)
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Dir = dir
 	cmd.Env = os.Environ()
-	cmd.Stderr = os.Stderr
+	if verbose {
+		cmd.Stderr = os.Stderr
+	} else {
+		cmd.Stderr = io.Discard
+	}
 	in, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -220,15 +234,40 @@ func startAppSession(ctx context.Context, base []string, model, effort, dir, res
 	return s, nil
 }
 
-func (s *appSession) Send(text string, onEvent func(contracts.BackendEvent)) (turnResult, error) {
+func (s *appSession) Send(ctx context.Context, text string, onEvent func(contracts.BackendEvent)) (turnResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case <-ctx.Done():
+		return turnResult{}, ctx.Err()
+	default:
+	}
 	id := s.nextID
 	s.nextID++
 	if err := s.write(turnStartRequest(id, s.threadID, text, s.model, s.effort)); err != nil {
 		return turnResult{}, err
 	}
-	return readTurn(s.out, onEvent)
+	result := make(chan struct {
+		turn turnResult
+		err  error
+	}, 1)
+	go func() {
+		tr, err := readTurn(s.out, onEvent)
+		result <- struct {
+			turn turnResult
+			err  error
+		}{tr, err}
+	}()
+	select {
+	case done := <-result:
+		return done.turn, done.err
+	case <-ctx.Done():
+		_ = s.abort()
+		return turnResult{}, ctx.Err()
+	}
 }
 
 func readTurn(r *bufio.Reader, onEvent func(contracts.BackendEvent)) (turnResult, error) {
@@ -315,8 +354,15 @@ func handleAppEvent(msg map[string]any, tr *turnResult, text *strings.Builder, o
 }
 
 func (s *appSession) Close() error {
+	return s.abort()
+}
+
+func (s *appSession) abort() error {
 	if s.stdin != nil {
 		_ = s.stdin.Close()
+	}
+	if s.outClose != nil {
+		_ = s.outClose.Close()
 	}
 	if s.cmd != nil && s.cmd.Process != nil {
 		_ = s.cmd.Process.Kill()

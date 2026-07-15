@@ -2,7 +2,9 @@ package codex
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -100,8 +102,22 @@ func TestAppSessionSend(t *testing.T) {
 	}()
 	s := newAppSession(inW, outR)
 	s.threadID = "thread-1"
-	tr, err := s.Send("hi", nil)
+	tr, err := s.Send(context.Background(), "hi", nil)
 	if err != nil || tr.Text != "ok" {
 		t.Fatalf("turn=%+v err=%v", tr, err)
+	}
+}
+
+func TestAppSessionSendHonorsCanceledContext(t *testing.T) {
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+	defer inR.Close()
+	defer outR.Close()
+	defer outW.Close()
+	s := newAppSession(inW, outR)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := s.Send(ctx, "never send", nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err=%v, want context.Canceled", err)
 	}
 }

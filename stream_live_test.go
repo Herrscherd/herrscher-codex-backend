@@ -13,16 +13,16 @@ func TestAppSessionLiveTwoTurns(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
-	s, err := startAppSession(ctx, []string{"codex"}, "", "", ".", "")
+	s, err := startAppSession(ctx, []string{"codex"}, "", "", ".", false, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	first, err := s.Send("Reply with exactly one word: ONE", nil)
+	first, err := s.Send(ctx, "Reply with exactly one word: ONE", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := s.Send("Reply with exactly one word: TWO", nil)
+	second, err := s.Send(ctx, "Reply with exactly one word: TWO", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -22,6 +22,12 @@ func TestNewBackendOneshotRequiresCmd(t *testing.T) {
 	}
 }
 
+func TestNewBackendRejectsUnknownKind(t *testing.T) {
+	if _, err := NewBackend(context.Background(), Config{Kind: "interactive", Cmd: "codex"}); err == nil {
+		t.Fatal("unknown backend kind should fail")
+	}
+}
+
 func TestCommandPresets(t *testing.T) {
 	got := CommandPresets("codex")
 	if len(got) == 0 {
