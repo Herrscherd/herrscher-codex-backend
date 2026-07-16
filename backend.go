@@ -1,10 +1,10 @@
 package codex
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -41,9 +41,8 @@ func NewBackend(ctx context.Context, c Config) (contracts.Backend, error) {
 		if strings.TrimSpace(c.Cmd) == "" {
 			return nil, fmt.Errorf("oneshot backend requires a non-empty Cmd")
 		}
-		cmdStr := c.Cmd
 		return &oneShotResponder{run: func(ctx context.Context, p contracts.Prompt) (string, error) {
-			return runCmd(ctx, cmdStr, c.Model, c.Effort, c.Dir, c.Verbose, p)
+			return runCmd(ctx, c.Cmd, c.Model, c.Effort, c.Dir, c.Verbose, p)
 		}}, nil
 	case "stream":
 		return &streamResponder{ctx: ctx, base: streamBase(strings.Fields(c.Cmd)), model: c.Model, effort: c.Effort, dir: c.Dir, verbose: c.Verbose}, nil
@@ -69,7 +68,6 @@ func runCmd(ctx context.Context, cmdStr, model, effort, dir string, verbose bool
 	args = append(args, content)
 	cmd := exec.CommandContext(ctx, fields[0], args...)
 	cmd.Dir = dir
-	cmd.Stdin = strings.NewReader(content)
 	cmd.Env = append(os.Environ(),
 		"DCTL_MSG="+p.Content,
 		"DCTL_AUTHOR="+p.Author,
@@ -77,23 +75,28 @@ func runCmd(ctx context.Context, cmdStr, model, effort, dir string, verbose bool
 		"DCTL_CHANNEL="+p.ChannelID,
 		"DCTL_ATTACHMENTS="+strings.Join(p.Attachments, string(os.PathListSeparator)),
 	)
-	var stderr bytes.Buffer
 	if verbose {
 		cmd.Stderr = os.Stderr
 	} else {
-		cmd.Stderr = &stderr
+		cmd.Stderr = io.Discard
 	}
 	out, err := cmd.Output()
-	if err != nil && stderr.Len() > 0 {
-		return parseExecOutput(string(out)), fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
+	if err != nil {
+		return parseExecOutput(string(out)), fmt.Errorf("codex exec failed: %w", err)
 	}
-	return parseExecOutput(string(out)), err
+	return parseExecOutput(string(out)), nil
 }
 
 func parseExecOutput(out string) string {
-	lines := strings.Split(out, "\n")
-	for i := len(lines) - 1; i >= 0; i-- {
-		line := strings.TrimSpace(lines[i])
+	for len(out) > 0 {
+		idx := strings.LastIndexByte(out, '\n')
+		raw := out[idx+1:]
+		if idx < 0 {
+			out = ""
+		} else {
+			out = out[:idx]
+		}
+		line := strings.TrimSpace(raw)
 		if line == "" {
 			continue
 		}
@@ -108,7 +111,7 @@ func parseExecOutput(out string) string {
 			return ev.Item.Text
 		}
 		if !strings.HasPrefix(line, "{") {
-			return lines[i]
+			return raw
 		}
 	}
 	return ""

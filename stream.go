@@ -86,14 +86,15 @@ func streamBase(fields []string) []string {
 	return fields
 }
 func appServerArgv(base []string) []string {
-	return append(append([]string{}, streamBase(base)...), "app-server", "--listen", "stdio://")
+	return append(append([]string{}, base...), "app-server", "--listen", "stdio://")
 }
 
 type turnResult struct {
-	Text     string
-	ThreadID string
-	IsError  bool
-	ErrMsg   string
+	Text      string
+	ThreadID  string
+	IsError   bool
+	ErrMsg    string
+	completed bool
 }
 
 type appSession struct {
@@ -290,8 +291,7 @@ func readTurn(r *bufio.Reader, onEvent func(contracts.BackendEvent)) (turnResult
 				}
 				handleAppEvent(msg, &tr, &text, onEvent)
 			}
-			if tr.IsError || tr.ThreadID == "__completed__" {
-				tr.ThreadID = ""
+			if tr.IsError || tr.completed {
 				if tr.Text == "" {
 					tr.Text = text.String()
 				}
@@ -338,7 +338,7 @@ func handleAppEvent(msg map[string]any, tr *turnResult, text *strings.Builder, o
 		if onEvent != nil {
 			onEvent(contracts.BackendEvent{Kind: "result", IsError: tr.IsError})
 		}
-		tr.ThreadID = "__completed__"
+		tr.completed = true
 	case "turn/failed", "error":
 		tr.IsError = true
 		tr.ErrMsg, _ = params["message"].(string)
@@ -348,7 +348,7 @@ func handleAppEvent(msg map[string]any, tr *turnResult, text *strings.Builder, o
 		if onEvent != nil {
 			onEvent(contracts.BackendEvent{Kind: "result", IsError: true})
 		}
-		tr.ThreadID = "__completed__"
+		tr.completed = true
 	}
 }
 
