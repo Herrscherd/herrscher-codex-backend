@@ -44,7 +44,7 @@ variables `DCTL_MSG`, `DCTL_AUTHOR`, `DCTL_MESSAGE_ID`, `DCTL_CHANNEL` et
 Le parser accepte les types d’items du protocole app-server (`agentMessage` et
 `commandExecution`) et ignore les notifications inconnues pour rester compatible
 avec les versions futures du CLI. Les presets couvrent le catalogue Codex
-actuel connu (`gpt-5.6-*`, `gpt-5.5`, `gpt-5.4` et `gpt-5.3-codex-spark`) ; pour
+actuel connu (`gpt-5.6-*`, `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini` et `gpt-5.3-codex-spark`) ; pour
 vérifier une installation donnée, utiliser `codex debug models`.
 
 `Verbose` active les diagnostics du processus app-server sur stderr. En mode

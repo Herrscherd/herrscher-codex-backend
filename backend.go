@@ -130,7 +130,11 @@ var modelPresets = []struct {
 
 // CommandPresets returns model × reasoning-effort command suggestions.
 func CommandPresets(bin string) []contracts.Choice {
-	var out []contracts.Choice
+	total := 0
+	for _, m := range modelPresets {
+		total += len(m.efforts)
+	}
+	out := make([]contracts.Choice, 0, total)
 	for _, m := range modelPresets {
 		for _, e := range m.efforts {
 			out = append(out, contracts.Choice{

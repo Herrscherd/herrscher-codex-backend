@@ -91,7 +91,6 @@ func appServerArgv(base []string) []string {
 
 type turnResult struct {
 	Text     string
-	CostUSD  float64
 	ThreadID string
 	IsError  bool
 	ErrMsg   string
@@ -189,8 +188,8 @@ func (s *appSession) initialize(resume string) error {
 	if err != nil {
 		return err
 	}
-	params, _ := msg["result"].(map[string]any)
-	thread, _ := params["thread"].(map[string]any)
+	result, _ := msg["result"].(map[string]any)
+	thread, _ := result["thread"].(map[string]any)
 	s.threadID, _ = thread["id"].(string)
 	if s.threadID == "" {
 		s.threadID = resume
