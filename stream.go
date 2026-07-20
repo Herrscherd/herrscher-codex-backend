@@ -30,6 +30,7 @@ type streamResponder struct {
 	base               []string
 	model, effort, dir string
 	verbose            bool
+	resumeID           string // thread id to resume on the FIRST start ("" = fresh)
 	mu                 sync.Mutex
 	sess               *appSession
 }
@@ -38,7 +39,7 @@ func (r *streamResponder) Respond(ctx context.Context, p contracts.Prompt, onEve
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.sess == nil {
-		s, err := startAppSession(r.ctx, r.base, r.model, r.effort, r.dir, r.verbose, "")
+		s, err := startAppSession(r.ctx, r.base, r.model, r.effort, r.dir, r.verbose, r.resumeID)
 		if err != nil {
 			return "", err
 		}
@@ -70,6 +71,21 @@ func (r *streamResponder) Respond(ctx context.Context, p contracts.Prompt, onEve
 	}
 	return tr.Text, nil
 }
+// ResumeToken returns the backend's current codex thread id — the stable id for
+// this conversation, for the host to persist and pass back via --resume. Before
+// the first turn it returns the id supplied at construction. Implements
+// contracts.ResumeAware.
+func (r *streamResponder) ResumeToken() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.sess == nil {
+		return r.resumeID
+	}
+	r.sess.mu.Lock()
+	defer r.sess.mu.Unlock()
+	return r.sess.threadID
+}
+
 func (r *streamResponder) Close() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()

@@ -14,13 +14,14 @@ import (
 
 // Config configures a Codex backend.
 type Config struct {
-	Kind    string
-	Stream  bool
-	Cmd     string
-	Model   string
-	Effort  string
-	Dir     string
-	Verbose bool
+	Kind     string
+	Stream   bool
+	Cmd      string
+	Model    string
+	Effort   string
+	Dir      string
+	Verbose  bool
+	ResumeID string // codex thread id to resume on first start ("" = fresh)
 }
 
 func resolveBackend(kind string, stream bool) string {
@@ -45,7 +46,7 @@ func NewBackend(ctx context.Context, c Config) (contracts.Backend, error) {
 			return runCmd(ctx, c.Cmd, c.Model, c.Effort, c.Dir, c.Verbose, p)
 		}}, nil
 	case "stream":
-		return &streamResponder{ctx: ctx, base: streamBase(strings.Fields(c.Cmd)), model: c.Model, effort: c.Effort, dir: c.Dir, verbose: c.Verbose}, nil
+		return &streamResponder{ctx: ctx, base: streamBase(strings.Fields(c.Cmd)), model: c.Model, effort: c.Effort, dir: c.Dir, verbose: c.Verbose, resumeID: c.ResumeID}, nil
 	default:
 		return nil, fmt.Errorf("unknown backend kind %q", kind)
 	}
