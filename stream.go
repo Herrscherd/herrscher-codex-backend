@@ -71,6 +71,7 @@ func (r *streamResponder) Respond(ctx context.Context, p contracts.Prompt, onEve
 	}
 	return tr.Text, nil
 }
+
 // ResumeToken returns the backend's current codex thread id — the stable id for
 // this conversation, for the host to persist and pass back via --resume. Before
 // the first turn it returns the id supplied at construction. Implements
