@@ -13,7 +13,7 @@ func TestAppSessionLiveTwoTurns(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
-	s, err := startAppSession(ctx, []string{"codex"}, "", "", ".", false, "")
+	s, err := startAppSession(ctx, ctx, []string{"codex"}, "", "", ".", false, "")
 	if err != nil {
 		t.Fatal(err)
 	}

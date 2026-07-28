@@ -39,7 +39,7 @@ func (r *streamResponder) Respond(ctx context.Context, p contracts.Prompt, onEve
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.sess == nil {
-		s, err := startAppSession(r.ctx, r.base, r.model, r.effort, r.dir, r.verbose, r.resumeID)
+		s, err := startAppSession(r.ctx, ctx, r.base, r.model, r.effort, r.dir, r.verbose, r.resumeID)
 		if err != nil {
 			return "", err
 		}
@@ -56,7 +56,7 @@ func (r *streamResponder) Respond(ctx context.Context, p contracts.Prompt, onEve
 		}
 		resume := r.sess.threadID
 		_ = r.sess.Close()
-		s, startErr := startAppSession(r.ctx, r.base, r.model, r.effort, r.dir, r.verbose, resume)
+		s, startErr := startAppSession(r.ctx, ctx, r.base, r.model, r.effort, r.dir, r.verbose, resume)
 		if startErr != nil {
 			return "", startErr
 		}
@@ -103,7 +103,15 @@ func streamBase(fields []string) []string {
 	return fields
 }
 func appServerArgv(base []string) []string {
-	return append(append([]string{}, base...), "app-server", "--listen", "stdio://")
+	argv := append([]string{}, base...)
+	argv = append(argv,
+		// See execArgs: headless runs non-interactively, sandbox_mode bounds the
+		// blast radius to the worktree, neublox MCP is the one trusted surface.
+		"-c", `approval_policy="never"`,
+		"-c", `sandbox_mode="workspace-write"`,
+		"-c", `mcp_servers.neublox.default_tools_approval_mode="approve"`,
+	)
+	return append(argv, "app-server", "--listen", "stdio://")
 }
 
 type turnResult struct {
@@ -218,9 +226,13 @@ func (s *appSession) initialize(resume string) error {
 	return nil
 }
 
-func startAppSession(ctx context.Context, base []string, model, effort, dir string, verbose bool, resume string) (*appSession, error) {
+// startAppSession spawns the app-server bound to procCtx (its lifetime spans
+// turns) and runs the initialize handshake bound to callCtx (the current turn).
+// A cancelled turn aborts a stalled handshake instead of blocking forever on a
+// silent app-server.
+func startAppSession(procCtx, callCtx context.Context, base []string, model, effort, dir string, verbose bool, resume string) (*appSession, error) {
 	argv := appServerArgv(base)
-	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	cmd := exec.CommandContext(procCtx, argv[0], argv[1:]...)
 	cmd.Dir = dir
 	cmd.Env = os.Environ()
 	if verbose {
@@ -244,11 +256,28 @@ func startAppSession(ctx context.Context, base []string, model, effort, dir stri
 	s.model = model
 	s.effort = effort
 	s.dir = dir
-	if err := s.initialize(resume); err != nil {
+	if err := s.initializeCtx(callCtx, resume); err != nil {
 		_ = s.Close()
 		return nil, err
 	}
 	return s, nil
+}
+
+// initializeCtx runs the blocking initialize handshake in a goroutine and
+// abandons it when callCtx is cancelled. The caller Closes the session on
+// error, which kills the process and unblocks the goroutine's pending read.
+func (s *appSession) initializeCtx(ctx context.Context, resume string) error {
+	if ctx == nil {
+		return s.initialize(resume)
+	}
+	done := make(chan error, 1)
+	go func() { done <- s.initialize(resume) }()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (s *appSession) Send(ctx context.Context, text string, onEvent func(contracts.BackendEvent)) (turnResult, error) {

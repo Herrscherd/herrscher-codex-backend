@@ -2,6 +2,7 @@ package codex
 
 import (
 	"context"
+	"reflect"
 	"testing"
 
 	"github.com/Herrscherd/herrscher-contracts"
@@ -51,6 +52,37 @@ func TestParseExecOutputUsesCodexAgentMessageType(t *testing.T) {
 	out := "{\"type\":\"item.completed\",\"item\":{\"type\":\"agentMessage\",\"text\":\"actual Codex response\"}}\n"
 	if got := parseExecOutput(out); got != "actual Codex response" {
 		t.Fatalf("output=%q", got)
+	}
+}
+
+func TestExecPromptUsesStdinForMultilineContent(t *testing.T) {
+	content := "<memory>\nprevious turns\n</memory>\n\ncurrent request"
+	arg, stdin := execPrompt(content)
+	if arg != "-" {
+		t.Fatalf("prompt argument=%q want=-", arg)
+	}
+	if stdin != content {
+		t.Fatalf("stdin=%q want=%q", stdin, content)
+	}
+}
+
+func TestExecArgsApproveOnlyNeubloxMCPForNonInteractiveTurns(t *testing.T) {
+	got := execArgs(
+		[]string{"codex", "--profile", "dev"},
+		"gpt-5.6-terra",
+		"medium",
+	)
+	want := []string{
+		"--profile", "dev",
+		"exec", "--json",
+		"-c", `approval_policy="never"`,
+		"-c", `sandbox_mode="workspace-write"`,
+		"-c", `mcp_servers.neublox.default_tools_approval_mode="approve"`,
+		"--model", "gpt-5.6-terra",
+		"-c", "model_reasoning_effort=medium",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("exec args = %v, want %v", got, want)
 	}
 }
 
