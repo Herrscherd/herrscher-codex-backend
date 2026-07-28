@@ -140,7 +140,13 @@ func execArgs(fields []string, model, effort string) []string {
 	args := append([]string{}, fields[1:]...)
 	args = append(args,
 		"exec", "--json",
+		// Headless: there is no human to answer approval prompts, so the agent
+		// runs non-interactively. sandbox_mode bounds what that permits — file
+		// and command execution stay confined to the worktree, and escalation is
+		// refused rather than blindly run. The neublox MCP is the one surface we
+		// explicitly trust to auto-approve.
 		"-c", `approval_policy="never"`,
+		"-c", `sandbox_mode="workspace-write"`,
 		"-c", `mcp_servers.neublox.default_tools_approval_mode="approve"`,
 	)
 	if model != "" {

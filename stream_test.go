@@ -8,6 +8,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Herrscherd/herrscher-contracts"
 )
@@ -17,6 +18,7 @@ func TestAppServerArgv(t *testing.T) {
 	want := []string{
 		"codex", "--profile", "dev",
 		"-c", `approval_policy="never"`,
+		"-c", `sandbox_mode="workspace-write"`,
 		"-c", `mcp_servers.neublox.default_tools_approval_mode="approve"`,
 		"app-server", "--listen", "stdio://",
 	}
@@ -180,5 +182,29 @@ func TestAppSessionSendHonorsCanceledContext(t *testing.T) {
 	cancel()
 	if _, err := s.Send(ctx, "never send", nil); !errors.Is(err, context.Canceled) {
 		t.Fatalf("err=%v, want context.Canceled", err)
+	}
+}
+
+func TestInitializeCtxAbortsOnCancel(t *testing.T) {
+	// stdin drains so the initialize request write succeeds; stdout never
+	// answers, so the handshake would block forever without ctx binding.
+	inR, inW := io.Pipe()
+	go func() { _, _ = io.Copy(io.Discard, inR) }()
+	stdoutR, stdoutW := io.Pipe()
+	defer stdoutW.Close()
+	s := newAppSession(inW, stdoutR)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- s.initializeCtx(ctx, "") }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("initializeCtx err = %v, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("initializeCtx did not honour a cancelled ctx")
 	}
 }

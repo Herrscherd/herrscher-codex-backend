@@ -76,6 +76,7 @@ func TestExecArgsApproveOnlyNeubloxMCPForNonInteractiveTurns(t *testing.T) {
 		"--profile", "dev",
 		"exec", "--json",
 		"-c", `approval_policy="never"`,
+		"-c", `sandbox_mode="workspace-write"`,
 		"-c", `mcp_servers.neublox.default_tools_approval_mode="approve"`,
 		"--model", "gpt-5.6-terra",
 		"-c", "model_reasoning_effort=medium",
