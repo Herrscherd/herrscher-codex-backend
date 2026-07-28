@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 
 	"github.com/Herrscherd/herrscher-contracts"
@@ -39,17 +40,69 @@ func NewBackend(ctx context.Context, c Config) (contracts.Backend, error) {
 	kind := resolveBackend(c.Kind, c.Stream)
 	switch kind {
 	case "oneshot":
-		if strings.TrimSpace(c.Cmd) == "" {
+		cmd, model, effort := oneShotCommand(c.Cmd, c.Model, c.Effort)
+		if cmd == "" {
 			return nil, fmt.Errorf("oneshot backend requires a non-empty Cmd")
 		}
 		return &oneShotResponder{run: func(ctx context.Context, p contracts.Prompt) (string, error) {
-			return runCmd(ctx, c.Cmd, c.Model, c.Effort, c.Dir, c.Verbose, p)
+			return runCmd(ctx, cmd, model, effort, c.Dir, c.Verbose, p)
 		}}, nil
 	case "stream":
-		return &streamResponder{ctx: ctx, base: streamBase(strings.Fields(c.Cmd)), model: c.Model, effort: c.Effort, dir: c.Dir, verbose: c.Verbose, resumeID: c.ResumeID}, nil
+		base, commandModel, commandEffort := streamCommand(strings.Fields(c.Cmd))
+		if c.Model == "" {
+			c.Model = commandModel
+		}
+		if c.Effort == "" {
+			c.Effort = commandEffort
+		}
+		// Codex app-server 0.145 can remain alive without completing turns on
+		// Windows. The normal exec transport is reliable there and preserves
+		// the same model/effort semantics, so prefer it until app-server is stable.
+		if runtime.GOOS == "windows" && os.Getenv("HERRSCHER_CODEX_ONESHOT_WINDOWS") == "1" {
+			cmd := strings.Join(streamBase(base), " ")
+			return &oneShotResponder{run: func(ctx context.Context, p contracts.Prompt) (string, error) {
+				return runCmd(ctx, cmd, c.Model, c.Effort, c.Dir, c.Verbose, p)
+			}}, nil
+		}
+		return &streamResponder{ctx: ctx, base: streamBase(base), model: c.Model, effort: c.Effort, dir: c.Dir, verbose: c.Verbose, resumeID: c.ResumeID}, nil
 	default:
 		return nil, fmt.Errorf("unknown backend kind %q", kind)
 	}
+}
+
+func oneShotCommand(cmd, model, effort string) (string, string, string) {
+	base, commandModel, commandEffort := streamCommand(strings.Fields(cmd))
+	if model == "" {
+		model = commandModel
+	}
+	if effort == "" {
+		effort = commandEffort
+	}
+	return strings.Join(base, " "), model, effort
+}
+
+// streamCommand separates turn configuration from the executable argv. Model
+// and effort belong to app-server RPC requests; leaving them before
+// "app-server" makes the Codex CLI reject the command and close stdout.
+func streamCommand(fields []string) (base []string, model, effort string) {
+	for i := 0; i < len(fields); i++ {
+		switch fields[i] {
+		case "--model", "-m":
+			if i+1 < len(fields) {
+				model = fields[i+1]
+				i++
+				continue
+			}
+		case "--effort":
+			if i+1 < len(fields) {
+				effort = fields[i+1]
+				i++
+				continue
+			}
+		}
+		base = append(base, fields[i])
+	}
+	return base, model, effort
 }
 
 func runCmd(ctx context.Context, cmdStr, model, effort, dir string, verbose bool, p contracts.Prompt) (string, error) {

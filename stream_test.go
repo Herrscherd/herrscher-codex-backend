@@ -20,6 +20,43 @@ func TestAppServerArgv(t *testing.T) {
 	}
 }
 
+func TestNewBackendExtractsModelAndEffortFromStreamCommand(t *testing.T) {
+	backend, err := NewBackend(context.Background(), Config{
+		Kind: "stream",
+		Cmd:  "codex --model gpt-5-codex --effort high",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := backend.(*streamResponder)
+	if strings.Join(got.base, " ") != "codex" {
+		t.Fatalf("base=%v want=[codex]", got.base)
+	}
+	if got.model != "gpt-5-codex" {
+		t.Fatalf("model=%q want=%q", got.model, "gpt-5-codex")
+	}
+	if got.effort != "high" {
+		t.Fatalf("effort=%q want=%q", got.effort, "high")
+	}
+}
+
+func TestOneShotCommandExtractsTurnConfiguration(t *testing.T) {
+	base, model, effort := oneShotCommand(
+		"codex --model gpt-5.6-terra --effort medium",
+		"",
+		"",
+	)
+	if base != "codex" {
+		t.Fatalf("base=%q want=codex", base)
+	}
+	if model != "gpt-5.6-terra" {
+		t.Fatalf("model=%q", model)
+	}
+	if effort != "medium" {
+		t.Fatalf("effort=%q", effort)
+	}
+}
+
 func TestReadTurnMapsCodexEvents(t *testing.T) {
 	lines := strings.Join([]string{
 		`{"method":"item/agentMessage/delta","params":{"delta":"hello"}}`,
