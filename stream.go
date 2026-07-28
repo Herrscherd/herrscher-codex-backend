@@ -103,7 +103,12 @@ func streamBase(fields []string) []string {
 	return fields
 }
 func appServerArgv(base []string) []string {
-	return append(append([]string{}, base...), "app-server", "--listen", "stdio://")
+	argv := append([]string{}, base...)
+	argv = append(argv,
+		"-c", `approval_policy="never"`,
+		"-c", `mcp_servers.neublox.default_tools_approval_mode="approve"`,
+	)
+	return append(argv, "app-server", "--listen", "stdio://")
 }
 
 type turnResult struct {

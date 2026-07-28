@@ -14,7 +14,12 @@ import (
 
 func TestAppServerArgv(t *testing.T) {
 	got := appServerArgv([]string{"codex", "--profile", "dev"})
-	want := []string{"codex", "--profile", "dev", "app-server", "--listen", "stdio://"}
+	want := []string{
+		"codex", "--profile", "dev",
+		"-c", `approval_policy="never"`,
+		"-c", `mcp_servers.neublox.default_tools_approval_mode="approve"`,
+		"app-server", "--listen", "stdio://",
+	}
 	if strings.Join(got, " ") != strings.Join(want, " ") {
 		t.Fatalf("argv=%v want=%v", got, want)
 	}
