@@ -40,6 +40,25 @@ func TestNewBackendExtractsModelAndEffortFromStreamCommand(t *testing.T) {
 	}
 }
 
+func TestStreamCommandOverridesGlobalModelAndEffort(t *testing.T) {
+	backend, err := NewBackend(context.Background(), Config{
+		Kind:   "stream",
+		Cmd:    "codex --model gpt-5.6-terra --effort medium",
+		Model:  "gpt-5-codex",
+		Effort: "high",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := backend.(*streamResponder)
+	if got.model != "gpt-5.6-terra" {
+		t.Fatalf("model=%q want=%q", got.model, "gpt-5.6-terra")
+	}
+	if got.effort != "medium" {
+		t.Fatalf("effort=%q want=%q", got.effort, "medium")
+	}
+}
+
 func TestOneShotCommandExtractsTurnConfiguration(t *testing.T) {
 	base, model, effort := oneShotCommand(
 		"codex --model gpt-5.6-terra --effort medium",

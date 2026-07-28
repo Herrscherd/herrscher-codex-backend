@@ -49,10 +49,10 @@ func NewBackend(ctx context.Context, c Config) (contracts.Backend, error) {
 		}}, nil
 	case "stream":
 		base, commandModel, commandEffort := streamCommand(strings.Fields(c.Cmd))
-		if c.Model == "" {
+		if commandModel != "" {
 			c.Model = commandModel
 		}
-		if c.Effort == "" {
+		if commandEffort != "" {
 			c.Effort = commandEffort
 		}
 		// Codex app-server 0.145 can remain alive without completing turns on
@@ -72,10 +72,10 @@ func NewBackend(ctx context.Context, c Config) (contracts.Backend, error) {
 
 func oneShotCommand(cmd, model, effort string) (string, string, string) {
 	base, commandModel, commandEffort := streamCommand(strings.Fields(cmd))
-	if model == "" {
+	if commandModel != "" {
 		model = commandModel
 	}
-	if effort == "" {
+	if commandEffort != "" {
 		effort = commandEffort
 	}
 	return strings.Join(base, " "), model, effort
@@ -119,9 +119,11 @@ func runCmd(ctx context.Context, cmdStr, model, effort, dir string, verbose bool
 	if effort != "" {
 		args = append(args, "-c", "model_reasoning_effort="+effort)
 	}
-	args = append(args, content)
+	promptArg, promptStdin := execPrompt(content)
+	args = append(args, promptArg)
 	cmd := exec.CommandContext(ctx, fields[0], args...)
 	cmd.Dir = dir
+	cmd.Stdin = strings.NewReader(promptStdin)
 	cmd.Env = append(os.Environ(),
 		"DCTL_MSG="+p.Content,
 		"DCTL_AUTHOR="+p.Author,
@@ -139,6 +141,10 @@ func runCmd(ctx context.Context, cmdStr, model, effort, dir string, verbose bool
 		return parseExecOutput(string(out)), fmt.Errorf("codex exec failed: %w", err)
 	}
 	return parseExecOutput(string(out)), nil
+}
+
+func execPrompt(content string) (argument, stdin string) {
+	return "-", content
 }
 
 func parseExecOutput(out string) string {

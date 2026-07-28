@@ -54,6 +54,17 @@ func TestParseExecOutputUsesCodexAgentMessageType(t *testing.T) {
 	}
 }
 
+func TestExecPromptUsesStdinForMultilineContent(t *testing.T) {
+	content := "<memory>\nprevious turns\n</memory>\n\ncurrent request"
+	arg, stdin := execPrompt(content)
+	if arg != "-" {
+		t.Fatalf("prompt argument=%q want=-", arg)
+	}
+	if stdin != content {
+		t.Fatalf("stdin=%q want=%q", stdin, content)
+	}
+}
+
 func mustBackend(t *testing.T, c Config) contracts.Backend {
 	t.Helper()
 	b, err := NewBackend(context.Background(), c)
