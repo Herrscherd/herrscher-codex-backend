@@ -111,14 +111,7 @@ func runCmd(ctx context.Context, cmdStr, model, effort, dir string, verbose bool
 		return "", fmt.Errorf("empty Codex command")
 	}
 	content := withContext(p.Context, withAttachments(p.Content, p.Attachments))
-	args := append([]string{}, fields[1:]...)
-	args = append(args, "exec", "--json")
-	if model != "" {
-		args = append(args, "--model", model)
-	}
-	if effort != "" {
-		args = append(args, "-c", "model_reasoning_effort="+effort)
-	}
+	args := execArgs(fields, model, effort)
 	promptArg, promptStdin := execPrompt(content)
 	args = append(args, promptArg)
 	cmd := exec.CommandContext(ctx, fields[0], args...)
@@ -141,6 +134,22 @@ func runCmd(ctx context.Context, cmdStr, model, effort, dir string, verbose bool
 		return parseExecOutput(string(out)), fmt.Errorf("codex exec failed: %w", err)
 	}
 	return parseExecOutput(string(out)), nil
+}
+
+func execArgs(fields []string, model, effort string) []string {
+	args := append([]string{}, fields[1:]...)
+	args = append(args,
+		"exec", "--json",
+		"-c", `approval_policy="never"`,
+		"-c", `mcp_servers.neublox.default_tools_approval_mode="approve"`,
+	)
+	if model != "" {
+		args = append(args, "--model", model)
+	}
+	if effort != "" {
+		args = append(args, "-c", "model_reasoning_effort="+effort)
+	}
+	return args
 }
 
 func execPrompt(content string) (argument, stdin string) {

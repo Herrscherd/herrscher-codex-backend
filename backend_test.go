@@ -2,6 +2,7 @@ package codex
 
 import (
 	"context"
+	"reflect"
 	"testing"
 
 	"github.com/Herrscherd/herrscher-contracts"
@@ -62,6 +63,25 @@ func TestExecPromptUsesStdinForMultilineContent(t *testing.T) {
 	}
 	if stdin != content {
 		t.Fatalf("stdin=%q want=%q", stdin, content)
+	}
+}
+
+func TestExecArgsApproveOnlyNeubloxMCPForNonInteractiveTurns(t *testing.T) {
+	got := execArgs(
+		[]string{"codex", "--profile", "dev"},
+		"gpt-5.6-terra",
+		"medium",
+	)
+	want := []string{
+		"--profile", "dev",
+		"exec", "--json",
+		"-c", `approval_policy="never"`,
+		"-c", `mcp_servers.neublox.default_tools_approval_mode="approve"`,
+		"--model", "gpt-5.6-terra",
+		"-c", "model_reasoning_effort=medium",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("exec args = %v, want %v", got, want)
 	}
 }
 
