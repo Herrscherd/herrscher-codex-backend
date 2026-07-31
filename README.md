@@ -1,81 +1,63 @@
 # herrscher-codex-backend
 
-Backend Codex pour Herrscher. Ce module implémente le même contrat que
-`herrscher-claude-backend`, mais parle au CLI Codex local.
+**Codex CLI as a Herrscher backend.** Turns an inbound prompt into a reply by
+driving the locally installed `codex` binary — either a persistent
+`codex app-server` process speaking JSONL, or a fresh `codex exec --json` per
+message. It is not an API client: it holds no key and reaches no OpenAI endpoint
+itself; authentication belongs to your Codex install.
 
-## Entrée
+## Role · Category · Ports · Config · Status · Repo
 
-```go
-func NewBackend(ctx context.Context, c Config) (contracts.Backend, error)
-```
+| Aspect | Value |
+|--------|-------|
+| **Role** | Answers one prompt per turn by driving the local Codex CLI. |
+| **Category** | Backend (model edge) |
+| **Ports implemented** | `contracts.Backend`; `contracts.ResumeAware` (stream mode only) |
+| **Config & env** | `CODEX_CMD` (default: `codex`), `CODEX_MODEL`, `CODEX_EFFORT`, `CODEX_STREAM` (default: `true`), `CODEX_DIR`, `CODEX_KIND`; plus `HERRSCHER_CODEX_ONESHOT_WINDOWS=1` (Windows escape hatch) |
+| **Status** | live |
+| **Repo** | [herrscher-codex-backend](https://github.com/Herrscherd/herrscher-codex-backend) |
 
-La configuration principale est :
-
-```go
-type Config struct {
-    Kind   string // "stream" | "oneshot"
-    Stream bool   // utilisé si Kind est vide
-    Cmd    string // commande de base, défaut pratique : codex
-    Model  string
-    Effort string
-    Dir    string
-    Verbose bool
-}
-```
-
-## Modes
-
-Le mode `stream` démarre un processus persistant :
-
-```text
-codex app-server --listen stdio://
-```
-
-Le backend initialise la connexion JSONL, crée ou reprend un thread, puis envoie
-un `turn/start` par message. Les notifications `item/agentMessage/delta`, les
-exécutions de commandes et `turn/completed` sont converties en événements
-`contracts.BackendEvent`. Une mort du processus déclenche `reset`, un redémarrage
-et une nouvelle tentative du tour.
-
-Le mode `oneshot` exécute `codex exec --json` à chaque message. Il conserve les
-variables `DCTL_MSG`, `DCTL_AUTHOR`, `DCTL_MESSAGE_ID`, `DCTL_CHANNEL` et
-`DCTL_ATTACHMENTS` pour les intégrations qui en ont besoin.
-
-Le parser accepte les types d’items du protocole app-server (`agentMessage` et
-`commandExecution`) et ignore les notifications inconnues pour rester compatible
-avec les versions futures du CLI. Les presets couvrent le catalogue Codex
-actuel connu (`gpt-5.6-*`, `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini` et `gpt-5.3-codex-spark`) ; pour
-vérifier une installation donnée, utiliser `codex debug models`.
-
-`Verbose` active les diagnostics du processus app-server sur stderr. En mode
-oneshot, stderr reste séparé de la réponse JSONL et est inclus dans l’erreur si
-Codex termine avec un code non nul.
-
-## Enregistrement
-
-Un blank import auto-enregistre le plugin avec `Kind: "codex"`. Les réglages
-disponibles sont `CODEX_CMD`, `CODEX_MODEL`, `CODEX_EFFORT`, `CODEX_STREAM`,
-`CODEX_DIR` et `CODEX_KIND`.
-
-`CommandPresets("codex")` expose la matrice modèle × effort pour les suggestions
-de `/session create cmd:`.
-
-## Développement
-
-Ce module est hors du `go.work` parent ; les commandes locales utilisent donc :
+## Install
 
 ```bash
-GOWORK=off go build ./...
-GOWORK=off go vet ./...
+herrscher plugin add github.com/Herrscherd/herrscher-codex-backend
+```
+
+## Two modes
+
+`stream` (default) starts `codex app-server --listen stdio://` once and sends one
+`turn/start` per message, mapping `item/agentMessage/delta`, command executions
+and `turn/completed` onto `contracts.BackendEvent`. A dead process emits a
+`reset` event, then restarts and retries the turn against the same thread id.
+`ResumeToken()` exposes that thread id; the host persists it and feeds it back
+through the `resume` setting at construction (host-injected — it is not one of
+the declared, env-backed settings).
+
+`oneshot` (`CODEX_STREAM=false` or `CODEX_KIND=oneshot`) runs `codex exec --json`
+per message and additionally exports `DCTL_MSG`, `DCTL_AUTHOR`,
+`DCTL_MESSAGE_ID`, `DCTL_CHANNEL` and `DCTL_ATTACHMENTS` to the child.
+
+Both modes run headless: `approval_policy="never"`,
+`sandbox_mode="workspace-write"`, and the `neublox` MCP auto-approved. Any
+`--model` / `--effort` inside `CODEX_CMD` is lifted out of the argv and sent as a
+turn parameter instead, because the Codex CLI rejects those flags before
+`app-server`.
+
+## Development
+
+This module sits outside the parent `go.work`, so local commands need
+`GOWORK=off`; CI runs them without it.
+
+```bash
 GOWORK=off go test ./...
+DCTL_LIVE=1 GOWORK=off go test -run Live ./...   # needs an authenticated codex
 ```
 
-La CI GitHub exécute les mêmes contrôles sans `GOWORK=off`, car ce dépôt est un
-module Go autonome.
+`CommandPresets("codex")` returns the model × effort matrix used for
+`/session create cmd:` suggestions. Verify a given install with
+`codex debug models`.
 
-Le test live persistant est ignoré par défaut. Pour l’exécuter avec une
-installation Codex authentifiée :
+## Further reading
 
-```bash
-DCTL_LIVE=1 GOWORK=off go test -run Live ./...
-```
+- [Herrscher docs](https://github.com/Herrscherd/herrscher-docs) — `plugins/backend`
+- [contracts](https://github.com/Herrscherd/herrscher-contracts) — port signatures
