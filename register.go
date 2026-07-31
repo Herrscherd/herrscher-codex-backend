@@ -10,6 +10,7 @@ func init() {
 	contracts.Register(contracts.Plugin{
 		Manifest: contracts.Manifest{
 			Kind: "codex", Category: contracts.CategoryBackend,
+			Status: contracts.StatusLive,
 			Config: []contracts.Setting{
 				{Key: "cmd", Env: "CODEX_CMD", Help: "base command to run the agent", Default: "codex"},
 				{Key: "model", Env: "CODEX_MODEL", Help: "model override"},

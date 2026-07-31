@@ -2,7 +2,12 @@ package codex
 
 import (
 	"context"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/Herrscherd/herrscher-contracts"
@@ -93,4 +98,77 @@ func mustBackend(t *testing.T, c Config) contracts.Backend {
 		t.Fatal(err)
 	}
 	return b
+}
+
+// TestRunCmdErrorIncludesStderr pins that a failing codex CLI surfaces its own
+// diagnostic. cmd.Output() only populates ExitError.Stderr when Stderr is nil,
+// and we set it (for the verbose passthrough), so it must be captured by hand.
+func TestRunCmdErrorIncludesStderr(t *testing.T) {
+	// A stand-in for the codex binary: ignores its argv, complains on stderr and
+	// exits non-zero — exactly the shape that used to debug blind.
+	fake := filepath.Join(t.TempDir(), "codex")
+	script := "#!/bin/sh\necho 'codex: model not found' >&2\nexit 7\n"
+	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, err := runCmd(context.Background(), fake, "", "", "", false,
+		contracts.Prompt{Content: "unused"})
+	if err == nil {
+		t.Fatal("expected an error from a failing command")
+	}
+	if !strings.Contains(err.Error(), "codex exec failed") {
+		t.Fatalf("error = %q, want it to mention codex exec failed", err)
+	}
+	if !strings.Contains(err.Error(), "codex: model not found") {
+		t.Fatalf("error = %q, want it to carry the child's stderr", err)
+	}
+}
+
+func TestRunCmdErrorCarriesChildStderrText(t *testing.T) {
+	// Direct check of the capture wiring runCmd uses: stderr must survive
+	// cmd.Output(), which discards ExitError.Stderr once Stderr is non-nil.
+	buf := &boundedBuffer{limit: stderrCaptureLimit}
+	cmd := exec.CommandContext(context.Background(), "sh", "-c", "echo boom-sentinel >&2; exit 3")
+	cmd.Stderr = buf
+	if _, err := cmd.Output(); err == nil {
+		t.Fatal("expected non-zero exit")
+	}
+	if got := strings.TrimSpace(buf.String()); got != "boom-sentinel" {
+		t.Fatalf("captured stderr = %q, want boom-sentinel", got)
+	}
+}
+
+func TestBoundedBufferTruncatesRunawayStderr(t *testing.T) {
+	b := &boundedBuffer{limit: 8}
+	n, err := b.Write([]byte("aaaa"))
+	if n != 4 || err != nil {
+		t.Fatalf("Write = %d, %v", n, err)
+	}
+	// Over-long writes must still report a full write so the child never sees a
+	// short write on its stderr pipe.
+	if n, err := b.Write([]byte("bbbbbbbbbb")); n != 10 || err != nil {
+		t.Fatalf("Write = %d, %v; want 10, nil", n, err)
+	}
+	got := b.String()
+	if !strings.HasPrefix(got, "aaaabbbb") {
+		t.Fatalf("String() = %q, want it to start with the first 8 bytes", got)
+	}
+	if !strings.Contains(got, "6 more bytes truncated") {
+		t.Fatalf("String() = %q, want a truncation marker", got)
+	}
+}
+
+func TestRunCmdVerboseStillPassesStderrThrough(t *testing.T) {
+	// Verbose keeps the os.Stderr passthrough *and* captures; assert the
+	// capturing half via a MultiWriter equivalent.
+	var mirror strings.Builder
+	buf := &boundedBuffer{limit: stderrCaptureLimit}
+	cmd := exec.CommandContext(context.Background(), "sh", "-c", "echo mirrored >&2; exit 1")
+	cmd.Stderr = io.MultiWriter(&mirror, buf)
+	if _, err := cmd.Output(); err == nil {
+		t.Fatal("expected non-zero exit")
+	}
+	if !strings.Contains(mirror.String(), "mirrored") || !strings.Contains(buf.String(), "mirrored") {
+		t.Fatalf("mirror = %q, buf = %q; both should see stderr", mirror.String(), buf.String())
+	}
 }

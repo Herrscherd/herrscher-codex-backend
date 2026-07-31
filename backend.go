@@ -105,6 +105,41 @@ func streamCommand(fields []string) (base []string, model, effort string) {
 	return base, model, effort
 }
 
+// stderrCaptureLimit bounds how much child stderr is retained for error
+// reporting. 8 KiB is far more than any codex diagnostic needs while keeping a
+// runaway process from ballooning memory; the overflow is dropped and marked.
+const stderrCaptureLimit = 8 << 10
+
+// boundedBuffer accumulates at most limit bytes and reports the drop. Writes
+// past the limit are discarded rather than failing, so the child never sees a
+// short write / broken pipe just because its stderr got noisy.
+type boundedBuffer struct {
+	limit   int
+	buf     []byte
+	dropped int
+}
+
+func (b *boundedBuffer) Write(p []byte) (int, error) {
+	if room := b.limit - len(b.buf); room > 0 {
+		if len(p) <= room {
+			b.buf = append(b.buf, p...)
+			return len(p), nil
+		}
+		b.buf = append(b.buf, p[:room]...)
+		b.dropped += len(p) - room
+		return len(p), nil
+	}
+	b.dropped += len(p)
+	return len(p), nil
+}
+
+func (b *boundedBuffer) String() string {
+	if b.dropped > 0 {
+		return string(b.buf) + fmt.Sprintf("… (%d more bytes truncated)", b.dropped)
+	}
+	return string(b.buf)
+}
+
 func runCmd(ctx context.Context, cmdStr, model, effort, dir string, verbose bool, p contracts.Prompt) (string, error) {
 	fields := strings.Fields(cmdStr)
 	if len(fields) == 0 {
@@ -124,13 +159,20 @@ func runCmd(ctx context.Context, cmdStr, model, effort, dir string, verbose bool
 		"DCTL_CHANNEL="+p.ChannelID,
 		"DCTL_ATTACHMENTS="+strings.Join(p.Attachments, string(os.PathListSeparator)),
 	)
+	// Capture stderr so a failing codex CLI reports its own diagnostic instead of
+	// a bare exit status. cmd.Output() only fills ExitError.Stderr when Stderr is
+	// nil, and we need the verbose passthrough, so capture it explicitly.
+	errBuf := &boundedBuffer{limit: stderrCaptureLimit}
 	if verbose {
-		cmd.Stderr = os.Stderr
+		cmd.Stderr = io.MultiWriter(os.Stderr, errBuf)
 	} else {
-		cmd.Stderr = io.Discard
+		cmd.Stderr = errBuf
 	}
 	out, err := cmd.Output()
 	if err != nil {
+		if detail := strings.TrimSpace(errBuf.String()); detail != "" {
+			return parseExecOutput(string(out)), fmt.Errorf("codex exec failed: %w: %s", err, detail)
+		}
 		return parseExecOutput(string(out)), fmt.Errorf("codex exec failed: %w", err)
 	}
 	return parseExecOutput(string(out)), nil
