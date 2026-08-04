@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/Herrscherd/herrscher-contracts"
 )
 
 // gatewayConfigTOML renders the config.toml that declares the Neublox gateway
@@ -25,9 +27,9 @@ model_provider = "neublox"
 [model_providers.neublox]
 name = "Neublox"
 base_url = %q
-env_key = "NEUBLOX_TOKEN"
+env_key = %q
 wire_api = "responses"
-`, baseURL)
+`, baseURL, contracts.EnvNeubloxToken)
 }
 
 // writeGatewayHome materializes a disposable, per-spawn CODEX_HOME under dir

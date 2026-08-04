@@ -52,7 +52,7 @@ func NewBackend(ctx context.Context, c Config) (contracts.Backend, error) {
 	// responder must remove when its session ends (see oneShotResponder and
 	// streamResponder Close in stream.go).
 	var gatewayHome string
-	if base := c.Env["OPENAI_BASE_URL"]; base != "" {
+	if base := c.Env[contracts.EnvOpenAIBaseURL]; base != "" {
 		home, err := writeGatewayHome(os.TempDir(), base)
 		if err != nil {
 			return nil, err
