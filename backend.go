@@ -23,6 +23,11 @@ type Config struct {
 	Dir      string
 	Verbose  bool
 	ResumeID string // codex thread id to resume on first start ("" = fresh)
+
+	// Env is injected into the child process's environment at every spawn. It
+	// carries gateway credentials and is NEVER persisted or logged: that is
+	// what distinguishes it from Cmd, which ends up in state.json and in `ps`.
+	Env map[string]string
 }
 
 func resolveBackend(kind string, stream bool) string {
@@ -45,7 +50,7 @@ func NewBackend(ctx context.Context, c Config) (contracts.Backend, error) {
 			return nil, fmt.Errorf("oneshot backend requires a non-empty Cmd")
 		}
 		return &oneShotResponder{run: func(ctx context.Context, p contracts.Prompt) (string, error) {
-			return runCmd(ctx, cmd, model, effort, c.Dir, c.Verbose, p)
+			return runCmd(ctx, cmd, model, effort, c.Dir, c.Verbose, c.Env, p)
 		}}, nil
 	case "stream":
 		base, commandModel, commandEffort := streamCommand(strings.Fields(c.Cmd))
@@ -61,10 +66,10 @@ func NewBackend(ctx context.Context, c Config) (contracts.Backend, error) {
 		if runtime.GOOS == "windows" && os.Getenv("HERRSCHER_CODEX_ONESHOT_WINDOWS") == "1" {
 			cmd := strings.Join(streamBase(base), " ")
 			return &oneShotResponder{run: func(ctx context.Context, p contracts.Prompt) (string, error) {
-				return runCmd(ctx, cmd, c.Model, c.Effort, c.Dir, c.Verbose, p)
+				return runCmd(ctx, cmd, c.Model, c.Effort, c.Dir, c.Verbose, c.Env, p)
 			}}, nil
 		}
-		return &streamResponder{ctx: ctx, base: streamBase(base), model: c.Model, effort: c.Effort, dir: c.Dir, verbose: c.Verbose, resumeID: c.ResumeID}, nil
+		return &streamResponder{ctx: ctx, base: streamBase(base), model: c.Model, effort: c.Effort, dir: c.Dir, verbose: c.Verbose, resumeID: c.ResumeID, env: c.Env}, nil
 	default:
 		return nil, fmt.Errorf("unknown backend kind %q", kind)
 	}
@@ -140,7 +145,11 @@ func (b *boundedBuffer) String() string {
 	return string(b.buf)
 }
 
-func runCmd(ctx context.Context, cmdStr, model, effort, dir string, verbose bool, p contracts.Prompt) (string, error) {
+// runCmd executes cmdStr (the codex CLI plus flags) as a one-shot exec. env is
+// merged over the daemon's inherited environment plus this call's own DCTL_*
+// variables (see contracts.MergeEnv): with no injection, the child process
+// environment is unchanged.
+func runCmd(ctx context.Context, cmdStr, model, effort, dir string, verbose bool, env map[string]string, p contracts.Prompt) (string, error) {
 	fields := strings.Fields(cmdStr)
 	if len(fields) == 0 {
 		return "", fmt.Errorf("empty Codex command")
@@ -152,13 +161,13 @@ func runCmd(ctx context.Context, cmdStr, model, effort, dir string, verbose bool
 	cmd := exec.CommandContext(ctx, fields[0], args...)
 	cmd.Dir = dir
 	cmd.Stdin = strings.NewReader(promptStdin)
-	cmd.Env = append(os.Environ(),
+	cmd.Env = contracts.MergeEnv(append(os.Environ(),
 		"DCTL_MSG="+p.Content,
 		"DCTL_AUTHOR="+p.Author,
 		"DCTL_MESSAGE_ID="+p.MessageID,
 		"DCTL_CHANNEL="+p.ChannelID,
 		"DCTL_ATTACHMENTS="+strings.Join(p.Attachments, string(os.PathListSeparator)),
-	)
+	), env)
 	// Capture stderr so a failing codex CLI reports its own diagnostic instead of
 	// a bare exit status. cmd.Output() only fills ExitError.Stderr when Stderr is
 	// nil, and we need the verbose passthrough, so capture it explicitly.

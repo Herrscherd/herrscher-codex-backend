@@ -111,7 +111,7 @@ func TestRunCmdErrorIncludesStderr(t *testing.T) {
 	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	_, err := runCmd(context.Background(), fake, "", "", "", false,
+	_, err := runCmd(context.Background(), fake, "", "", "", false, nil,
 		contracts.Prompt{Content: "unused"})
 	if err == nil {
 		t.Fatal("expected an error from a failing command")

@@ -30,7 +30,8 @@ type streamResponder struct {
 	base               []string
 	model, effort, dir string
 	verbose            bool
-	resumeID           string // thread id to resume on the FIRST start ("" = fresh)
+	resumeID           string            // thread id to resume on the FIRST start ("" = fresh)
+	env                map[string]string // injected into the child process at every (re)spawn
 	mu                 sync.Mutex
 	sess               *appSession
 }
@@ -39,7 +40,7 @@ func (r *streamResponder) Respond(ctx context.Context, p contracts.Prompt, onEve
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.sess == nil {
-		s, err := startAppSession(r.ctx, ctx, r.base, r.model, r.effort, r.dir, r.verbose, r.resumeID)
+		s, err := startAppSession(r.ctx, ctx, r.base, r.model, r.effort, r.dir, r.verbose, r.resumeID, r.env)
 		if err != nil {
 			return "", err
 		}
@@ -56,7 +57,7 @@ func (r *streamResponder) Respond(ctx context.Context, p contracts.Prompt, onEve
 		}
 		resume := r.sess.threadID
 		_ = r.sess.Close()
-		s, startErr := startAppSession(r.ctx, ctx, r.base, r.model, r.effort, r.dir, r.verbose, resume)
+		s, startErr := startAppSession(r.ctx, ctx, r.base, r.model, r.effort, r.dir, r.verbose, resume, r.env)
 		if startErr != nil {
 			return "", startErr
 		}
@@ -229,12 +230,14 @@ func (s *appSession) initialize(resume string) error {
 // startAppSession spawns the app-server bound to procCtx (its lifetime spans
 // turns) and runs the initialize handshake bound to callCtx (the current turn).
 // A cancelled turn aborts a stalled handshake instead of blocking forever on a
-// silent app-server.
-func startAppSession(procCtx, callCtx context.Context, base []string, model, effort, dir string, verbose bool, resume string) (*appSession, error) {
+// silent app-server. env is merged over the daemon's inherited environment
+// (see contracts.MergeEnv): with no injection, the child process environment
+// is unchanged.
+func startAppSession(procCtx, callCtx context.Context, base []string, model, effort, dir string, verbose bool, resume string, env map[string]string) (*appSession, error) {
 	argv := appServerArgv(base)
 	cmd := exec.CommandContext(procCtx, argv[0], argv[1:]...)
 	cmd.Dir = dir
-	cmd.Env = os.Environ()
+	cmd.Env = contracts.MergeEnv(os.Environ(), env)
 	if verbose {
 		cmd.Stderr = os.Stderr
 	} else {
