@@ -18,12 +18,24 @@ import (
 
 type oneShotResponder struct {
 	run func(context.Context, contracts.Prompt) (string, error)
+
+	// gatewayHome is the per-spawn CODEX_HOME directory created by
+	// writeGatewayHome for a gateway route ("" on the native route). Close
+	// removes it so a long-running host does not leak one directory per
+	// session.
+	gatewayHome string
 }
 
 func (o *oneShotResponder) Respond(ctx context.Context, p contracts.Prompt, _ func(contracts.BackendEvent)) (string, error) {
 	return o.run(ctx, p)
 }
-func (o *oneShotResponder) Close() error { return nil }
+
+func (o *oneShotResponder) Close() error {
+	if o.gatewayHome == "" {
+		return nil
+	}
+	return os.RemoveAll(o.gatewayHome)
+}
 
 type streamResponder struct {
 	ctx                context.Context
@@ -32,6 +44,7 @@ type streamResponder struct {
 	verbose            bool
 	resumeID           string            // thread id to resume on the FIRST start ("" = fresh)
 	env                map[string]string // injected into the child process at every (re)spawn
+	gatewayHome        string            // per-spawn CODEX_HOME to remove on Close ("" on the native route)
 	mu                 sync.Mutex
 	sess               *appSession
 }
@@ -91,10 +104,16 @@ func (r *streamResponder) ResumeToken() string {
 func (r *streamResponder) Close() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	var sessErr error
 	if r.sess != nil {
-		return r.sess.Close()
+		sessErr = r.sess.Close()
 	}
-	return nil
+	if r.gatewayHome != "" {
+		if err := os.RemoveAll(r.gatewayHome); err != nil && sessErr == nil {
+			return err
+		}
+	}
+	return sessErr
 }
 
 func streamBase(fields []string) []string {

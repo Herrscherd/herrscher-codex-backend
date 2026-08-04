@@ -30,12 +30,19 @@ wire_api = "responses"
 `, baseURL)
 }
 
-// writeGatewayHome materializes a disposable CODEX_HOME under dir and returns
-// its path. The file is 0600: it holds no secret, but it does describe where
-// the user's traffic is routed.
+// writeGatewayHome materializes a disposable, per-spawn CODEX_HOME under dir
+// and returns its path. os.MkdirTemp is used rather than a fixed name so that
+// two concurrent gateway sessions never share a directory (and therefore
+// never race on one config.toml or bleed one session's base_url/token pairing
+// into another's spawn), and so the 0o700 mode is actually enforced by
+// creation rather than being a no-op MkdirAll over a directory — or symlink —
+// that may already exist at a guessable path. The caller is responsible for
+// removing the returned directory once the session that owns it ends; see
+// oneShotResponder and streamResponder Close in stream.go. The file is 0600:
+// it holds no secret, but it does describe where the user's traffic is routed.
 func writeGatewayHome(dir, baseURL string) (string, error) {
-	home := filepath.Join(dir, "codex-home")
-	if err := os.MkdirAll(home, 0o700); err != nil {
+	home, err := os.MkdirTemp(dir, "codex-home-*")
+	if err != nil {
 		return "", fmt.Errorf("codex gateway home: %w", err)
 	}
 	path := filepath.Join(home, "config.toml")

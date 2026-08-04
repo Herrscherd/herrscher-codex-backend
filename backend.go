@@ -45,14 +45,19 @@ func NewBackend(ctx context.Context, c Config) (contracts.Backend, error) {
 	// A gateway route is present when the host injected OPENAI_BASE_URL (Task
 	// 8). Unlike the claude CLI, codex is not driven by environment variables
 	// alone: it needs a custom provider declared in config.toml under
-	// CODEX_HOME. Materialize a disposable one and point CODEX_HOME at it. The
-	// map is copied rather than mutated in place: c.Env comes from the host and
-	// may be shared across multiple NewBackend calls.
+	// CODEX_HOME. Materialize a per-spawn disposable one and point CODEX_HOME
+	// at it. The map is copied rather than mutated in place: c.Env comes from
+	// the host and may be shared across multiple NewBackend calls. gatewayHome
+	// is non-empty only on this route, and is the directory the returned
+	// responder must remove when its session ends (see oneShotResponder and
+	// streamResponder Close in stream.go).
+	var gatewayHome string
 	if base := c.Env["OPENAI_BASE_URL"]; base != "" {
 		home, err := writeGatewayHome(os.TempDir(), base)
 		if err != nil {
 			return nil, err
 		}
+		gatewayHome = home
 		env := make(map[string]string, len(c.Env)+1)
 		for k, v := range c.Env {
 			env[k] = v
@@ -67,9 +72,12 @@ func NewBackend(ctx context.Context, c Config) (contracts.Backend, error) {
 		if cmd == "" {
 			return nil, fmt.Errorf("oneshot backend requires a non-empty Cmd")
 		}
-		return &oneShotResponder{run: func(ctx context.Context, p contracts.Prompt) (string, error) {
-			return runCmd(ctx, cmd, model, effort, c.Dir, c.Verbose, c.Env, p)
-		}}, nil
+		return &oneShotResponder{
+			run: func(ctx context.Context, p contracts.Prompt) (string, error) {
+				return runCmd(ctx, cmd, model, effort, c.Dir, c.Verbose, c.Env, p)
+			},
+			gatewayHome: gatewayHome,
+		}, nil
 	case "stream":
 		base, commandModel, commandEffort := streamCommand(strings.Fields(c.Cmd))
 		if commandModel != "" {
@@ -83,11 +91,14 @@ func NewBackend(ctx context.Context, c Config) (contracts.Backend, error) {
 		// the same model/effort semantics, so prefer it until app-server is stable.
 		if runtime.GOOS == "windows" && os.Getenv("HERRSCHER_CODEX_ONESHOT_WINDOWS") == "1" {
 			cmd := strings.Join(streamBase(base), " ")
-			return &oneShotResponder{run: func(ctx context.Context, p contracts.Prompt) (string, error) {
-				return runCmd(ctx, cmd, c.Model, c.Effort, c.Dir, c.Verbose, c.Env, p)
-			}}, nil
+			return &oneShotResponder{
+				run: func(ctx context.Context, p contracts.Prompt) (string, error) {
+					return runCmd(ctx, cmd, c.Model, c.Effort, c.Dir, c.Verbose, c.Env, p)
+				},
+				gatewayHome: gatewayHome,
+			}, nil
 		}
-		return &streamResponder{ctx: ctx, base: streamBase(base), model: c.Model, effort: c.Effort, dir: c.Dir, verbose: c.Verbose, resumeID: c.ResumeID, env: c.Env}, nil
+		return &streamResponder{ctx: ctx, base: streamBase(base), model: c.Model, effort: c.Effort, dir: c.Dir, verbose: c.Verbose, resumeID: c.ResumeID, env: c.Env, gatewayHome: gatewayHome}, nil
 	default:
 		return nil, fmt.Errorf("unknown backend kind %q", kind)
 	}
