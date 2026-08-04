@@ -336,3 +336,56 @@ func TestFailingNewBackendLeavesNoGatewayHome(t *testing.T) {
 		})
 	}
 }
+
+// The host's contracts.GatewayCreds already makes a half-pair
+// unrepresentable, but this backend is a separate module driven through a
+// plain map[string]string: a base URL with no token must be refused here too,
+// rather than producing a CODEX_HOME whose env_key points at nothing and a
+// session that authenticates as nobody.
+func TestNewBackendRefusesGatewayBaseURLWithoutToken(t *testing.T) {
+	before := tempCodexHomes(t)
+	for _, tc := range []struct {
+		name  string
+		token string
+	}{
+		{"absent token", ""},
+		{"blank token", "   "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := map[string]string{contracts.EnvOpenAIBaseURL: "https://gw.example"}
+			if tc.token != "" {
+				env[contracts.EnvNeubloxToken] = tc.token
+			}
+			if _, err := NewBackend(context.Background(), Config{Kind: "oneshot", Cmd: "codex", Env: env}); err == nil {
+				t.Fatal("NewBackend accepted a gateway base URL with no token")
+			}
+		})
+	}
+	if after := tempCodexHomes(t); after != before {
+		t.Fatalf("refused spawn left a CODEX_HOME behind: %d before, %d after", before, after)
+	}
+}
+
+// A complete pair still builds — the guard must refuse the half-pair, not the
+// gateway route itself.
+func TestNewBackendAcceptsGatewayPair(t *testing.T) {
+	b, err := NewBackend(context.Background(), Config{Kind: "oneshot", Cmd: "codex", Env: map[string]string{
+		contracts.EnvOpenAIBaseURL: "https://gw.example",
+		contracts.EnvNeubloxToken:  "tok",
+	}})
+	if err != nil {
+		t.Fatalf("NewBackend refused a complete gateway pair: %v", err)
+	}
+	if c, ok := b.(interface{ Close() error }); ok {
+		_ = c.Close()
+	}
+}
+
+func tempCodexHomes(t *testing.T) int {
+	t.Helper()
+	m, err := filepath.Glob(filepath.Join(os.TempDir(), "codex-home-*"))
+	if err != nil {
+		t.Fatalf("glob: %v", err)
+	}
+	return len(m)
+}

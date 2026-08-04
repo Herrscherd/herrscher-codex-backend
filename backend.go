@@ -40,8 +40,40 @@ func resolveBackend(kind string, stream bool) string {
 	return "oneshot"
 }
 
+// checkGatewayPair refuses a spawn whose environment carries a gateway base
+// URL without the token that goes with it.
+//
+// A base URL alone routes the turn through the gateway while the CLI
+// authenticates with whatever login the machine already has: the session runs
+// on the user's own subscription, which is the shape we are not allowed to
+// produce. For codex the degraded spawn is even quieter than for claude — the
+// generated config.toml only REFERENCES the token by env_key, so an absent or
+// blank one yields a provider that authenticates as nobody and fails far from
+// its cause.
+//
+// The host's contracts.GatewayCreds already makes the half-pair
+// unrepresentable, but this backend is a separate module reached through a
+// plain map[string]string, so a host bug or an "env" setting from elsewhere
+// would walk straight through. Defence in depth; the correct failure is a
+// refusal to spawn, never a degraded spawn.
+func checkGatewayPair(env map[string]string) error {
+	if env[contracts.EnvOpenAIBaseURL] == "" {
+		return nil
+	}
+	if strings.TrimSpace(env[contracts.EnvNeubloxToken]) == "" {
+		return fmt.Errorf("refusing to spawn: %s is set without %s; the session would run on the machine's own subscription while being routed through the gateway",
+			contracts.EnvOpenAIBaseURL, contracts.EnvNeubloxToken)
+	}
+	return nil
+}
+
 // NewBackend builds a configured Codex backend.
 func NewBackend(ctx context.Context, c Config) (contracts.Backend, error) {
+	// Before anything is created on disk: a half-pair must not even reach
+	// writeGatewayHome.
+	if err := checkGatewayPair(c.Env); err != nil {
+		return nil, err
+	}
 	// A gateway route is present when the host injected OPENAI_BASE_URL (Task
 	// 8). Unlike the claude CLI, codex is not driven by environment variables
 	// alone: it needs a custom provider declared in config.toml under
