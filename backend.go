@@ -65,12 +65,23 @@ func NewBackend(ctx context.Context, c Config) (contracts.Backend, error) {
 		env["CODEX_HOME"] = home
 		c.Env = env
 	}
+	// Every failure below has to remove a CODEX_HOME already created: the
+	// directory is owned by the responder that gets returned, and on an error
+	// path no responder is returned, so nothing would ever remove it. The host
+	// retries a misconfigured gateway session, which would otherwise leave one
+	// /tmp/codex-home-* behind per attempt for the daemon's lifetime.
+	fail := func(err error) (contracts.Backend, error) {
+		if gatewayHome != "" {
+			_ = os.RemoveAll(gatewayHome)
+		}
+		return nil, err
+	}
 	kind := resolveBackend(c.Kind, c.Stream)
 	switch kind {
 	case "oneshot":
 		cmd, model, effort := oneShotCommand(c.Cmd, c.Model, c.Effort)
 		if cmd == "" {
-			return nil, fmt.Errorf("oneshot backend requires a non-empty Cmd")
+			return fail(fmt.Errorf("oneshot backend requires a non-empty Cmd"))
 		}
 		return &oneShotResponder{
 			run: func(ctx context.Context, p contracts.Prompt) (string, error) {
@@ -100,7 +111,7 @@ func NewBackend(ctx context.Context, c Config) (contracts.Backend, error) {
 		}
 		return &streamResponder{ctx: ctx, base: streamBase(base), model: c.Model, effort: c.Effort, dir: c.Dir, verbose: c.Verbose, resumeID: c.ResumeID, env: c.Env, gatewayHome: gatewayHome}, nil
 	default:
-		return nil, fmt.Errorf("unknown backend kind %q", kind)
+		return fail(fmt.Errorf("unknown backend kind %q", kind))
 	}
 }
 

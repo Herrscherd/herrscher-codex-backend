@@ -49,6 +49,10 @@ func writeGatewayHome(dir, baseURL string) (string, error) {
 	}
 	path := filepath.Join(home, "config.toml")
 	if err := os.WriteFile(path, []byte(gatewayConfigTOML(baseURL)), 0o600); err != nil {
+		// The directory exists but is unusable and nobody owns it yet: no
+		// responder is returned on this path, so remove it here rather than
+		// leaving an empty CODEX_HOME behind.
+		_ = os.RemoveAll(home)
 		return "", fmt.Errorf("codex gateway config: %w", err)
 	}
 	return home, nil

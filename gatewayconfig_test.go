@@ -292,3 +292,47 @@ func TestNativeRouteLeavesCodexHomeUnset(t *testing.T) {
 		t.Fatalf("CODEX_HOME leaked into the native route: %q", out)
 	}
 }
+
+// TestFailingNewBackendLeavesNoGatewayHome pins the cleanup on NewBackend's
+// error paths. The generated CODEX_HOME is owned by the responder that gets
+// returned (which removes it on Close); when construction fails no responder
+// exists, so nothing would ever remove it. The host retries a misconfigured
+// gateway session, so before the fix each attempt left one /tmp/codex-home-*
+// behind for the daemon's lifetime.
+//
+// TMPDIR is redirected at a fresh directory because NewBackend materializes
+// the home under os.TempDir(); counting entries there is what makes the leak
+// observable at all.
+func TestFailingNewBackendLeavesNoGatewayHome(t *testing.T) {
+	gatewayEnv := map[string]string{
+		contracts.EnvOpenAIBaseURL: "https://gw.example/openai",
+		contracts.EnvNeubloxToken:  "probe-token",
+	}
+	for _, tc := range []struct {
+		name string
+		cfg  Config
+	}{
+		{"unknown kind", Config{Kind: "bogus-kind", Env: gatewayEnv}},
+		{"oneshot with empty Cmd", Config{Kind: "oneshot", Cmd: "", Env: gatewayEnv}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			t.Setenv("TMPDIR", tmp)
+
+			if _, err := NewBackend(context.Background(), tc.cfg); err == nil {
+				t.Fatal("NewBackend succeeded, want an error")
+			}
+			left, err := os.ReadDir(tmp)
+			if err != nil {
+				t.Fatalf("ReadDir: %v", err)
+			}
+			if len(left) != 0 {
+				var names []string
+				for _, e := range left {
+					names = append(names, e.Name())
+				}
+				t.Fatalf("failed NewBackend leaked %d entries under TMPDIR: %v", len(left), names)
+			}
+		})
+	}
+}
