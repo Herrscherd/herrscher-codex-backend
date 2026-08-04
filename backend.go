@@ -282,35 +282,3 @@ func parseExecOutput(out string) string {
 	}
 	return ""
 }
-
-var modelPresets = []struct {
-	label   string
-	model   string
-	efforts []string
-}{
-	{"GPT-5.6 Sol", "gpt-5.6-sol", []string{"low", "medium", "high", "xhigh", "max", "ultra"}},
-	{"GPT-5.6 Terra", "gpt-5.6-terra", []string{"low", "medium", "high", "xhigh", "max", "ultra"}},
-	{"GPT-5.6 Luna", "gpt-5.6-luna", []string{"low", "medium", "high", "xhigh", "max"}},
-	{"GPT-5.5", "gpt-5.5", []string{"low", "medium", "high", "xhigh"}},
-	{"GPT-5.4", "gpt-5.4", []string{"low", "medium", "high", "xhigh"}},
-	{"GPT-5.4 Mini", "gpt-5.4-mini", []string{"low", "medium", "high", "xhigh"}},
-	{"GPT-5.3 Codex Spark", "gpt-5.3-codex-spark", []string{"low", "medium", "high", "xhigh"}},
-}
-
-// CommandPresets returns model × reasoning-effort command suggestions.
-func CommandPresets(bin string) []contracts.Choice {
-	total := 0
-	for _, m := range modelPresets {
-		total += len(m.efforts)
-	}
-	out := make([]contracts.Choice, 0, total)
-	for _, m := range modelPresets {
-		for _, e := range m.efforts {
-			out = append(out, contracts.Choice{
-				Label: m.label + " · " + e,
-				Value: bin + " --model " + m.model + " -c model_reasoning_effort=" + e,
-			})
-		}
-	}
-	return out
-}
