@@ -17,6 +17,11 @@ var Models = []contracts.ModelSpec{
 	{ID: "gpt-5-codex", Label: "GPT-5 Codex", Arg: "gpt-5-codex", Route: contracts.RouteNative},
 	{ID: "gpt-5.5", Label: "GPT-5.5", Arg: "gpt-5.5", Route: contracts.RouteNative},
 	{ID: "o4-mini", Label: "o4-mini", Arg: "o4-mini", Route: contracts.RouteNative},
+
+	// --- Gateway route -------------------------------------------------
+	// Served by the gateway's OpenAI facade (see gatewayconfig.go).
+	{ID: "gw-gpt-5.6-sol", Label: "GPT-5.6 Sol", Arg: "gpt-5.6-sol", Efforts: efforts, Route: contracts.RouteGateway},
+	{ID: "gw-gpt-5.5", Label: "GPT-5.5", Arg: "gpt-5.5", Route: contracts.RouteGateway},
 }
 
 // gpt-5 is deliberately absent: commit 3557344 proved it does not exist on

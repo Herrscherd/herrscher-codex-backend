@@ -12,14 +12,15 @@ func TestModelsAreValid(t *testing.T) {
 	}
 }
 
-func TestModelsAreAllNativeForNow(t *testing.T) {
-	// Gateway entries are a later task. Until they land, this backend must only
-	// declare native models — otherwise the host would offer a model that no
-	// credential can serve.
+func TestGatewayModelsExist(t *testing.T) {
+	var n int
 	for _, m := range Models {
-		if m.Route != contracts.RouteNative {
-			t.Errorf("model %q has route %q, expected native at this stage", m.ID, m.Route)
+		if m.Route == contracts.RouteGateway {
+			n++
 		}
+	}
+	if n == 0 {
+		t.Fatal("no gateway models declared; the public build would have an empty catalog")
 	}
 }
 
