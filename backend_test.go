@@ -34,16 +34,6 @@ func TestNewBackendRejectsUnknownKind(t *testing.T) {
 	}
 }
 
-func TestCommandPresets(t *testing.T) {
-	got := CommandPresets("codex")
-	if len(got) == 0 {
-		t.Fatal("expected Codex command presets")
-	}
-	if got[0].Value == "" || got[0].Label == "" {
-		t.Fatalf("invalid preset: %+v", got[0])
-	}
-}
-
 func TestParseExecOutput(t *testing.T) {
 	out := "{\"type\":\"thread.started\",\"thread_id\":\"t\"}\n" +
 		"{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"final answer\"}}\n" +
@@ -111,7 +101,7 @@ func TestRunCmdErrorIncludesStderr(t *testing.T) {
 	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	_, err := runCmd(context.Background(), fake, "", "", "", false,
+	_, err := runCmd(context.Background(), fake, "", "", "", false, nil,
 		contracts.Prompt{Content: "unused"})
 	if err == nil {
 		t.Fatal("expected an error from a failing command")

@@ -13,7 +13,7 @@ itself; authentication belongs to your Codex install.
 | **Role** | Answers one prompt per turn by driving the local Codex CLI. |
 | **Category** | Backend (model edge) |
 | **Ports implemented** | `contracts.Backend`; `contracts.ResumeAware` (stream mode only) |
-| **Config & env** | `CODEX_CMD` (default: `codex`), `CODEX_MODEL`, `CODEX_EFFORT`, `CODEX_STREAM` (default: `true`), `CODEX_DIR`, `CODEX_KIND`; plus `HERRSCHER_CODEX_ONESHOT_WINDOWS=1` (Windows escape hatch) |
+| **Config & env** | `CODEX_CMD` (default: `codex`), `CODEX_MODEL`, `CODEX_EFFORT`, `CODEX_STREAM` (default: `true`), `CODEX_DIR`, `CODEX_KIND`; plus `HERRSCHER_CODEX_ONESHOT_WINDOWS=1` (Windows escape hatch); plus `env` — declared with no env binding and injected by the host per session (`K=V` per line, merged onto every spawned child), never read from the daemon's environment |
 | **Status** | live |
 | **Repo** | [herrscher-codex-backend](https://github.com/Herrscherd/herrscher-codex-backend) |
 
@@ -43,6 +43,32 @@ Both modes run headless: `approval_policy="never"`,
 turn parameter instead, because the Codex CLI rejects those flags before
 `app-server`.
 
+## Model catalog and the gateway route
+
+`Models` (`models.go`) is published through `Manifest.Models`, so the host can
+read the catalog without instantiating the backend. Entries carry an id, a
+label, the `--model` argument and the effort axis where there is one. Most are
+route `native` (the local `codex` login answers); a few `gw-*` entries are
+route `gateway`, served by the gateway's OpenAI-shaped facade. Prices are left
+at 0 (unknown).
+
+Unlike the claude CLI, `codex` cannot be redirected with environment variables
+alone: a third-party provider has to be declared in TOML. So when the host
+injects `OPENAI_BASE_URL` through the `env` setting — the signal that this
+spawn is on the gateway route — `NewBackend` materializes a **disposable,
+per-spawn `CODEX_HOME`**: a `0700` temp directory holding a generated
+`config.toml` that declares `[model_providers.neublox]` with
+`wire_api = "responses"` (codex 0.146.0 rejects `"chat"` outright), and points
+`CODEX_HOME` at it. The token is never written to that file — it is referenced
+by `env_key` (`NEUBLOX_TOKEN`) and supplied at run time — so a directory left
+behind on disk holds no secret. The responder owns the directory and removes it
+on `Close`; construction failures remove it too, so a retried misconfigured
+session does not leak one `/tmp/codex-home-*` per attempt. On the native route
+nothing of this happens and no `CODEX_HOME` is set.
+
+This quirk is deliberately confined to this plugin: neither the host, nor the
+app, nor the claude backend knows about it.
+
 ## Development
 
 This module sits outside the parent `go.work`, so local commands need
@@ -53,9 +79,10 @@ GOWORK=off go test ./...
 DCTL_LIVE=1 GOWORK=off go test -run Live ./...   # needs an authenticated codex
 ```
 
-`CommandPresets("codex")` returns the model × effort matrix used for
-`/session create cmd:` suggestions. Verify a given install with
-`codex debug models`.
+The host no longer derives model suggestions from this package's helpers: it
+aggregates `Manifest.Models` across the compiled backends (`herrscher models
+list`) and takes the choice as `session create --model`. Verify what a given
+install actually recognizes with `codex debug models`.
 
 ## Further reading
 

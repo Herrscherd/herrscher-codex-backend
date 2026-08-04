@@ -18,10 +18,25 @@ func init() {
 				{Key: "stream", Env: "CODEX_STREAM", Help: "persistent app-server mode (false to disable)", Default: "true"},
 				{Key: "dir", Env: "CODEX_DIR", Help: "working directory"},
 				{Key: "kind", Env: "CODEX_KIND", Help: "backend kind"},
+				// Env is deliberately left unbound (Env: "") — this setting comes
+				// from the host per session, never from a daemon environment
+				// variable. Binding it would let a single env var hijack every
+				// session at once.
+				{Key: "env", Env: "", Help: "per-session env injected at spawn (K=V per line); host-supplied, never from the environment"},
 			},
+			Models: Models,
 		},
 		Backend: func(ctx context.Context, cfg contracts.PluginConfig) (contracts.Backend, error) {
-			return NewBackend(ctx, Config{Kind: cfg.Get("kind"), Stream: cfg.Get("stream") != "false", Cmd: cfg.Get("cmd"), Model: cfg.Get("model"), Effort: cfg.Get("effort"), Dir: cfg.Get("dir"), ResumeID: cfg.Get("resume")})
+			return NewBackend(ctx, Config{
+				Kind:     cfg.Get("kind"),
+				Stream:   cfg.Get("stream") != "false",
+				Cmd:      cfg.Get("cmd"),
+				Model:    cfg.Get("model"),
+				Effort:   cfg.Get("effort"),
+				Dir:      cfg.Get("dir"),
+				ResumeID: cfg.Get("resume"),
+				Env:      contracts.ParseEnvSetting(cfg.Get("env")),
+			})
 		},
 	})
 }

@@ -23,6 +23,11 @@ type Config struct {
 	Dir      string
 	Verbose  bool
 	ResumeID string // codex thread id to resume on first start ("" = fresh)
+
+	// Env is injected into the child process's environment at every spawn. It
+	// carries gateway credentials and is NEVER persisted or logged: that is
+	// what distinguishes it from Cmd, which ends up in state.json and in `ps`.
+	Env map[string]string
 }
 
 func resolveBackend(kind string, stream bool) string {
@@ -35,18 +40,87 @@ func resolveBackend(kind string, stream bool) string {
 	return "oneshot"
 }
 
+// checkGatewayPair refuses a spawn whose environment carries a gateway base
+// URL without the token that goes with it.
+//
+// A base URL alone routes the turn through the gateway while the CLI
+// authenticates with whatever login the machine already has: the session runs
+// on the user's own subscription, which is the shape we are not allowed to
+// produce. For codex the degraded spawn is even quieter than for claude — the
+// generated config.toml only REFERENCES the token by env_key, so an absent or
+// blank one yields a provider that authenticates as nobody and fails far from
+// its cause.
+//
+// The host's contracts.GatewayCreds already makes the half-pair
+// unrepresentable, but this backend is a separate module reached through a
+// plain map[string]string, so a host bug or an "env" setting from elsewhere
+// would walk straight through. Defence in depth; the correct failure is a
+// refusal to spawn, never a degraded spawn.
+func checkGatewayPair(env map[string]string) error {
+	if env[contracts.EnvOpenAIBaseURL] == "" {
+		return nil
+	}
+	if strings.TrimSpace(env[contracts.EnvNeubloxToken]) == "" {
+		return fmt.Errorf("refusing to spawn: %s is set without %s; the session would run on the machine's own subscription while being routed through the gateway",
+			contracts.EnvOpenAIBaseURL, contracts.EnvNeubloxToken)
+	}
+	return nil
+}
+
 // NewBackend builds a configured Codex backend.
 func NewBackend(ctx context.Context, c Config) (contracts.Backend, error) {
+	// Before anything is created on disk: a half-pair must not even reach
+	// writeGatewayHome.
+	if err := checkGatewayPair(c.Env); err != nil {
+		return nil, err
+	}
+	// A gateway route is present when the host injected OPENAI_BASE_URL.
+	// Unlike the claude CLI, codex is not driven by environment variables
+	// alone: it needs a custom provider declared in config.toml under
+	// CODEX_HOME. Materialize a per-spawn disposable one and point CODEX_HOME
+	// at it. The map is copied rather than mutated in place: c.Env comes from
+	// the host and may be shared across multiple NewBackend calls. gatewayHome
+	// is non-empty only on this route, and is the directory the returned
+	// responder must remove when its session ends (see oneShotResponder and
+	// streamResponder Close in stream.go).
+	var gatewayHome string
+	if base := c.Env[contracts.EnvOpenAIBaseURL]; base != "" {
+		home, err := writeGatewayHome(os.TempDir(), base)
+		if err != nil {
+			return nil, err
+		}
+		gatewayHome = home
+		env := make(map[string]string, len(c.Env)+1)
+		for k, v := range c.Env {
+			env[k] = v
+		}
+		env["CODEX_HOME"] = home
+		c.Env = env
+	}
+	// Every failure below has to remove a CODEX_HOME already created: the
+	// directory is owned by the responder that gets returned, and on an error
+	// path no responder is returned, so nothing would ever remove it. The host
+	// retries a misconfigured gateway session, which would otherwise leave one
+	// /tmp/codex-home-* behind per attempt for the daemon's lifetime.
+	fail := func(err error) (contracts.Backend, error) {
+		if gatewayHome != "" {
+			_ = os.RemoveAll(gatewayHome)
+		}
+		return nil, err
+	}
 	kind := resolveBackend(c.Kind, c.Stream)
 	switch kind {
 	case "oneshot":
 		cmd, model, effort := oneShotCommand(c.Cmd, c.Model, c.Effort)
 		if cmd == "" {
-			return nil, fmt.Errorf("oneshot backend requires a non-empty Cmd")
+			return fail(fmt.Errorf("oneshot backend requires a non-empty Cmd"))
 		}
-		return &oneShotResponder{run: func(ctx context.Context, p contracts.Prompt) (string, error) {
-			return runCmd(ctx, cmd, model, effort, c.Dir, c.Verbose, p)
-		}}, nil
+		return &oneShotResponder{
+			run: func(ctx context.Context, p contracts.Prompt) (string, error) {
+				return runCmd(ctx, cmd, model, effort, c.Dir, c.Verbose, c.Env, p)
+			},
+			gatewayHome: gatewayHome,
+		}, nil
 	case "stream":
 		base, commandModel, commandEffort := streamCommand(strings.Fields(c.Cmd))
 		if commandModel != "" {
@@ -60,13 +134,16 @@ func NewBackend(ctx context.Context, c Config) (contracts.Backend, error) {
 		// the same model/effort semantics, so prefer it until app-server is stable.
 		if runtime.GOOS == "windows" && os.Getenv("HERRSCHER_CODEX_ONESHOT_WINDOWS") == "1" {
 			cmd := strings.Join(streamBase(base), " ")
-			return &oneShotResponder{run: func(ctx context.Context, p contracts.Prompt) (string, error) {
-				return runCmd(ctx, cmd, c.Model, c.Effort, c.Dir, c.Verbose, p)
-			}}, nil
+			return &oneShotResponder{
+				run: func(ctx context.Context, p contracts.Prompt) (string, error) {
+					return runCmd(ctx, cmd, c.Model, c.Effort, c.Dir, c.Verbose, c.Env, p)
+				},
+				gatewayHome: gatewayHome,
+			}, nil
 		}
-		return &streamResponder{ctx: ctx, base: streamBase(base), model: c.Model, effort: c.Effort, dir: c.Dir, verbose: c.Verbose, resumeID: c.ResumeID}, nil
+		return &streamResponder{ctx: ctx, base: streamBase(base), model: c.Model, effort: c.Effort, dir: c.Dir, verbose: c.Verbose, resumeID: c.ResumeID, env: c.Env, gatewayHome: gatewayHome}, nil
 	default:
-		return nil, fmt.Errorf("unknown backend kind %q", kind)
+		return fail(fmt.Errorf("unknown backend kind %q", kind))
 	}
 }
 
@@ -140,7 +217,11 @@ func (b *boundedBuffer) String() string {
 	return string(b.buf)
 }
 
-func runCmd(ctx context.Context, cmdStr, model, effort, dir string, verbose bool, p contracts.Prompt) (string, error) {
+// runCmd executes cmdStr (the codex CLI plus flags) as a one-shot exec. env is
+// merged over the daemon's inherited environment plus this call's own DCTL_*
+// variables (see contracts.MergeEnv): with no injection, the child process
+// environment is unchanged.
+func runCmd(ctx context.Context, cmdStr, model, effort, dir string, verbose bool, env map[string]string, p contracts.Prompt) (string, error) {
 	fields := strings.Fields(cmdStr)
 	if len(fields) == 0 {
 		return "", fmt.Errorf("empty Codex command")
@@ -152,13 +233,13 @@ func runCmd(ctx context.Context, cmdStr, model, effort, dir string, verbose bool
 	cmd := exec.CommandContext(ctx, fields[0], args...)
 	cmd.Dir = dir
 	cmd.Stdin = strings.NewReader(promptStdin)
-	cmd.Env = append(os.Environ(),
+	cmd.Env = contracts.MergeEnv(append(os.Environ(),
 		"DCTL_MSG="+p.Content,
 		"DCTL_AUTHOR="+p.Author,
 		"DCTL_MESSAGE_ID="+p.MessageID,
 		"DCTL_CHANNEL="+p.ChannelID,
 		"DCTL_ATTACHMENTS="+strings.Join(p.Attachments, string(os.PathListSeparator)),
-	)
+	), env)
 	// Capture stderr so a failing codex CLI reports its own diagnostic instead of
 	// a bare exit status. cmd.Output() only fills ExitError.Stderr when Stderr is
 	// nil, and we need the verbose passthrough, so capture it explicitly.
@@ -232,36 +313,4 @@ func parseExecOutput(out string) string {
 		}
 	}
 	return ""
-}
-
-var modelPresets = []struct {
-	label   string
-	model   string
-	efforts []string
-}{
-	{"GPT-5.6 Sol", "gpt-5.6-sol", []string{"low", "medium", "high", "xhigh", "max", "ultra"}},
-	{"GPT-5.6 Terra", "gpt-5.6-terra", []string{"low", "medium", "high", "xhigh", "max", "ultra"}},
-	{"GPT-5.6 Luna", "gpt-5.6-luna", []string{"low", "medium", "high", "xhigh", "max"}},
-	{"GPT-5.5", "gpt-5.5", []string{"low", "medium", "high", "xhigh"}},
-	{"GPT-5.4", "gpt-5.4", []string{"low", "medium", "high", "xhigh"}},
-	{"GPT-5.4 Mini", "gpt-5.4-mini", []string{"low", "medium", "high", "xhigh"}},
-	{"GPT-5.3 Codex Spark", "gpt-5.3-codex-spark", []string{"low", "medium", "high", "xhigh"}},
-}
-
-// CommandPresets returns model × reasoning-effort command suggestions.
-func CommandPresets(bin string) []contracts.Choice {
-	total := 0
-	for _, m := range modelPresets {
-		total += len(m.efforts)
-	}
-	out := make([]contracts.Choice, 0, total)
-	for _, m := range modelPresets {
-		for _, e := range m.efforts {
-			out = append(out, contracts.Choice{
-				Label: m.label + " · " + e,
-				Value: bin + " --model " + m.model + " -c model_reasoning_effort=" + e,
-			})
-		}
-	}
-	return out
 }
