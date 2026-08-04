@@ -12,13 +12,53 @@ import (
 	"github.com/Herrscherd/herrscher-contracts"
 )
 
-func TestNativeSpawnEnvIsUnchanged(t *testing.T) {
-	// Non-regression for the internal build: with no injection, the child
-	// process environment is exactly the daemon's.
-	got := contracts.MergeEnv(os.Environ(), nil)
-	if len(got) != len(os.Environ()) {
-		t.Fatalf("native env has %d entries, os.Environ() has %d", len(got), len(os.Environ()))
+// TestNativeSpawnInheritsAndInjectionReplaces exercises the two spawn-time
+// environment properties through a real child process, not through
+// contracts.MergeEnv directly: on the native route the child sees the daemon's
+// own environment, and on the gateway route an injected key REPLACES the
+// inherited entry. The child sees one entry with the injected value: dropping
+// the merge, or letting the inherited value win, would run the session on the
+// machine's own login while the system believes it injected a gateway
+// credential. Asserting through a real child rather than through
+// contracts.MergeEnv is the point — that is the code path a spawn actually
+// takes, and os/exec's own dedup (last entry wins) is part of it.
+func TestNativeSpawnInheritsAndInjectionReplaces(t *testing.T) {
+	const probeVar = "HERRSCHER_ENV_PROBE"
+	// The script reports the value the child actually resolves AND how many
+	// entries for it the child's environment carries, on one line (runCmd's
+	// parseExecOutput keeps only the last non-empty output line).
+	path := filepath.Join(t.TempDir(), "codex")
+	script := fmt.Sprintf("#!/bin/sh\nprintf 'value=%%s count=%%s\\n' \"$%s\" \"$(env | grep -c '^%s=')\"\n", probeVar, probeVar)
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
 	}
+
+	run := func(t *testing.T, env map[string]string) string {
+		t.Helper()
+		b, err := NewBackend(context.Background(), Config{Kind: "oneshot", Cmd: path, Env: env})
+		if err != nil {
+			t.Fatalf("NewBackend: %v", err)
+		}
+		out, err := b.Respond(context.Background(), contracts.Prompt{Content: "x"}, nil)
+		if err != nil {
+			t.Fatalf("Respond: %v (output %q)", err, out)
+		}
+		return strings.TrimSpace(out)
+	}
+
+	t.Run("native spawn inherits the daemon environment", func(t *testing.T) {
+		t.Setenv(probeVar, "inherited")
+		if got := run(t, nil); got != "value=inherited count=1" {
+			t.Fatalf("native child env = %q, want value=inherited count=1", got)
+		}
+	})
+
+	t.Run("injection replaces rather than appends", func(t *testing.T) {
+		t.Setenv(probeVar, "inherited")
+		if got := run(t, map[string]string{probeVar: "injected"}); got != "value=injected count=1" {
+			t.Fatalf("injected child env = %q, want value=injected count=1", got)
+		}
+	})
 }
 
 // writeEnvProbeScript stands in for the codex CLI (same technique as
