@@ -42,6 +42,24 @@ func resolveBackend(kind string, stream bool) string {
 
 // NewBackend builds a configured Codex backend.
 func NewBackend(ctx context.Context, c Config) (contracts.Backend, error) {
+	// A gateway route is present when the host injected OPENAI_BASE_URL (Task
+	// 8). Unlike the claude CLI, codex is not driven by environment variables
+	// alone: it needs a custom provider declared in config.toml under
+	// CODEX_HOME. Materialize a disposable one and point CODEX_HOME at it. The
+	// map is copied rather than mutated in place: c.Env comes from the host and
+	// may be shared across multiple NewBackend calls.
+	if base := c.Env["OPENAI_BASE_URL"]; base != "" {
+		home, err := writeGatewayHome(os.TempDir(), base)
+		if err != nil {
+			return nil, err
+		}
+		env := make(map[string]string, len(c.Env)+1)
+		for k, v := range c.Env {
+			env[k] = v
+		}
+		env["CODEX_HOME"] = home
+		c.Env = env
+	}
 	kind := resolveBackend(c.Kind, c.Stream)
 	switch kind {
 	case "oneshot":
