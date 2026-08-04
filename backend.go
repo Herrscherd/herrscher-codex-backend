@@ -74,8 +74,8 @@ func NewBackend(ctx context.Context, c Config) (contracts.Backend, error) {
 	if err := checkGatewayPair(c.Env); err != nil {
 		return nil, err
 	}
-	// A gateway route is present when the host injected OPENAI_BASE_URL (Task
-	// 8). Unlike the claude CLI, codex is not driven by environment variables
+	// A gateway route is present when the host injected OPENAI_BASE_URL.
+	// Unlike the claude CLI, codex is not driven by environment variables
 	// alone: it needs a custom provider declared in config.toml under
 	// CODEX_HOME. Materialize a per-spawn disposable one and point CODEX_HOME
 	// at it. The map is copied rather than mutated in place: c.Env comes from
