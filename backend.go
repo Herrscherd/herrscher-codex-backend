@@ -108,9 +108,14 @@ func NewBackend(ctx context.Context, c Config) (contracts.Backend, error) {
 		}
 		return nil, err
 	}
+	// Read once per backend: the spawn environment is fixed for the process's
+	// lifetime, and asking again mid-turn could only ever answer differently
+	// from what codex was started with.
+	ap := approverFromEnv()
 	kind := resolveBackend(c.Kind, c.Stream)
 	switch kind {
 	case "oneshot":
+		warnOneShotUngated(ap, os.Stderr)
 		cmd, model, effort := oneShotCommand(c.Cmd, c.Model, c.Effort)
 		if cmd == "" {
 			return fail(fmt.Errorf("oneshot backend requires a non-empty Cmd"))
@@ -133,6 +138,7 @@ func NewBackend(ctx context.Context, c Config) (contracts.Backend, error) {
 		// Windows. The normal exec transport is reliable there and preserves
 		// the same model/effort semantics, so prefer it until app-server is stable.
 		if runtime.GOOS == "windows" && os.Getenv("HERRSCHER_CODEX_ONESHOT_WINDOWS") == "1" {
+			warnOneShotUngated(ap, os.Stderr)
 			cmd := strings.Join(streamBase(base), " ")
 			return &oneShotResponder{
 				run: func(ctx context.Context, p contracts.Prompt) (string, error) {
@@ -141,7 +147,7 @@ func NewBackend(ctx context.Context, c Config) (contracts.Backend, error) {
 				gatewayHome: gatewayHome,
 			}, nil
 		}
-		return &streamResponder{ctx: ctx, base: streamBase(base), model: c.Model, effort: c.Effort, dir: c.Dir, verbose: c.Verbose, resumeID: c.ResumeID, env: c.Env, gatewayHome: gatewayHome}, nil
+		return &streamResponder{ctx: ctx, base: streamBase(base), model: c.Model, effort: c.Effort, dir: c.Dir, verbose: c.Verbose, resumeID: c.ResumeID, env: c.Env, gatewayHome: gatewayHome, ap: ap}, nil
 	default:
 		return fail(fmt.Errorf("unknown backend kind %q", kind))
 	}
@@ -264,7 +270,11 @@ func execArgs(fields []string, model, effort string) []string {
 	args = append(args,
 		"exec", "--json",
 		// Headless: there is no human to answer approval prompts, so the agent
-		// runs non-interactively. sandbox_mode bounds what that permits — file
+		// runs non-interactively, and `codex exec` has no channel to ask on: it
+		// reads a prompt and writes a transcript, with no request an approver
+		// could answer. That is why this one is not derived from the policy, and
+		// why a gated session on this path is warned about rather than gated.
+		// sandbox_mode bounds what that permits: file
 		// and command execution stay confined to the worktree, and escalation is
 		// refused rather than blindly run. The neublox MCP is the one surface we
 		// explicitly trust to auto-approve.

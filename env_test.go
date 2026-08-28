@@ -170,7 +170,7 @@ func TestStreamSpawnAppliesInjectedEnv(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		sess, err := startAppSession(ctx, ctx, []string{"sh", "-c", script}, "", "", dir, false, "", map[string]string{probeVar: "injected-stream-value"})
+		sess, err := startAppSession(ctx, ctx, []string{"sh", "-c", script}, "", "", dir, false, "", map[string]string{probeVar: "injected-stream-value"}, nil)
 		if err == nil {
 			defer func() { _ = sess.Close() }()
 		}
@@ -195,7 +195,7 @@ func TestStreamSpawnAppliesInjectedEnv(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		sess, err := startAppSession(ctx, ctx, []string{"sh", "-c", script}, "", "", dir, false, "", nil)
+		sess, err := startAppSession(ctx, ctx, []string{"sh", "-c", script}, "", "", dir, false, "", nil, nil)
 		if err == nil {
 			defer func() { _ = sess.Close() }()
 		}

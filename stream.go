@@ -45,6 +45,7 @@ type streamResponder struct {
 	resumeID           string            // thread id to resume on the FIRST start ("" = fresh)
 	env                map[string]string // injected into the child process at every (re)spawn
 	gatewayHome        string            // per-spawn CODEX_HOME to remove on Close ("" on the native route)
+	ap                 *approver         // answers codex's approval requests; nil = this session runs ungated
 	mu                 sync.Mutex
 	sess               *appSession
 }
@@ -53,7 +54,7 @@ func (r *streamResponder) Respond(ctx context.Context, p contracts.Prompt, onEve
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.sess == nil {
-		s, err := startAppSession(r.ctx, ctx, r.base, r.model, r.effort, r.dir, r.verbose, r.resumeID, r.env)
+		s, err := startAppSession(r.ctx, ctx, r.base, r.model, r.effort, r.dir, r.verbose, r.resumeID, r.env, r.ap)
 		if err != nil {
 			return "", err
 		}
@@ -70,7 +71,7 @@ func (r *streamResponder) Respond(ctx context.Context, p contracts.Prompt, onEve
 		}
 		resume := r.sess.threadID
 		_ = r.sess.Close()
-		s, startErr := startAppSession(r.ctx, ctx, r.base, r.model, r.effort, r.dir, r.verbose, resume, r.env)
+		s, startErr := startAppSession(r.ctx, ctx, r.base, r.model, r.effort, r.dir, r.verbose, resume, r.env, r.ap)
 		if startErr != nil {
 			return "", startErr
 		}
@@ -122,12 +123,14 @@ func streamBase(fields []string) []string {
 	}
 	return fields
 }
-func appServerArgv(base []string) []string {
+func appServerArgv(base []string, gated bool) []string {
 	argv := append([]string{}, base...)
 	argv = append(argv,
 		// See execArgs: headless runs non-interactively, sandbox_mode bounds the
 		// blast radius to the worktree, neublox MCP is the one trusted surface.
-		"-c", `approval_policy="never"`,
+		// Under a policy the agent asks instead of deciding alone, which is what
+		// makes the requests this session answers ever arrive.
+		"-c", `approval_policy="`+approvalPolicy(gated)+`"`,
 		"-c", `sandbox_mode="workspace-write"`,
 		"-c", `mcp_servers.neublox.default_tools_approval_mode="approve"`,
 	)
@@ -151,6 +154,10 @@ type appSession struct {
 	threadID           string
 	model, effort, dir string
 	nextID             int
+	// ap answers codex's approval requests. nil = this session was spawned with
+	// no policy in force, and codex was started with approval_policy="never", so
+	// no request ever arrives to answer.
+	ap *approver
 }
 
 func newAppSession(stdin io.WriteCloser, out io.Reader) *appSession {
@@ -252,8 +259,8 @@ func (s *appSession) initialize(resume string) error {
 // silent app-server. env is merged over the daemon's inherited environment
 // (see contracts.MergeEnv): with no injection, the child process environment
 // is unchanged.
-func startAppSession(procCtx, callCtx context.Context, base []string, model, effort, dir string, verbose bool, resume string, env map[string]string) (*appSession, error) {
-	argv := appServerArgv(base)
+func startAppSession(procCtx, callCtx context.Context, base []string, model, effort, dir string, verbose bool, resume string, env map[string]string, ap *approver) (*appSession, error) {
+	argv := appServerArgv(base, ap != nil)
 	cmd := exec.CommandContext(procCtx, argv[0], argv[1:]...)
 	cmd.Dir = dir
 	cmd.Env = contracts.MergeEnv(os.Environ(), env)
@@ -278,6 +285,7 @@ func startAppSession(procCtx, callCtx context.Context, base []string, model, eff
 	s.model = model
 	s.effort = effort
 	s.dir = dir
+	s.ap = ap
 	if err := s.initializeCtx(callCtx, resume); err != nil {
 		_ = s.Close()
 		return nil, err
@@ -323,7 +331,7 @@ func (s *appSession) Send(ctx context.Context, text string, onEvent func(contrac
 		err  error
 	}, 1)
 	go func() {
-		tr, err := readTurn(s.out, onEvent)
+		tr, err := readTurn(ctx, s.out, onEvent, s.ap, s.write)
 		result <- struct {
 			turn turnResult
 			err  error
@@ -338,7 +346,10 @@ func (s *appSession) Send(ctx context.Context, text string, onEvent func(contrac
 	}
 }
 
-func readTurn(r *bufio.Reader, onEvent func(contracts.BackendEvent)) (turnResult, error) {
+// respond writes one reply back to the app-server. It is s.write at the only
+// call site, which is safe despite running in readTurn's goroutine: Send holds
+// s.mu for the whole turn, so there is exactly one writer at a time.
+func readTurn(ctx context.Context, r *bufio.Reader, onEvent func(contracts.BackendEvent), ap *approver, respond func(map[string]any) error) (turnResult, error) {
 	var tr turnResult
 	var text strings.Builder
 	for {
@@ -356,6 +367,10 @@ func readTurn(r *bufio.Reader, onEvent func(contracts.BackendEvent)) (turnResult
 						onEvent(contracts.BackendEvent{Kind: "result", IsError: true})
 					}
 					return tr, nil
+				}
+				if id, ok := msg["id"]; ok && msg["method"] != nil {
+					answerApproval(ctx, msg, id, ap, respond)
+					continue
 				}
 				handleAppEvent(msg, &tr, &text, onEvent)
 			}

@@ -14,7 +14,7 @@ import (
 )
 
 func TestAppServerArgv(t *testing.T) {
-	got := appServerArgv([]string{"codex", "--profile", "dev"})
+	got := appServerArgv([]string{"codex", "--profile", "dev"}, false)
 	want := []string{
 		"codex", "--profile", "dev",
 		"-c", `approval_policy="never"`,
@@ -91,7 +91,7 @@ func TestReadTurnMapsCodexEvents(t *testing.T) {
 		`{"method":"turn/completed","params":{"turn":{"status":"completed"}}}`,
 	}, "\n") + "\n"
 	var got []contracts.BackendEvent
-	tr, err := readTurn(bufio.NewReader(strings.NewReader(lines)), func(e contracts.BackendEvent) { got = append(got, e) })
+	tr, err := readTurn(context.Background(), bufio.NewReader(strings.NewReader(lines)), func(e contracts.BackendEvent) { got = append(got, e) }, nil, nil)
 	if err != nil || tr.Text != "hello world" {
 		t.Fatalf("turn=%+v err=%v", tr, err)
 	}
@@ -107,7 +107,7 @@ func TestReadTurnMapsCodexCamelCaseItems(t *testing.T) {
 		`{"method":"turn/completed","params":{"turn":{"status":"completed"}}}`,
 	}, "\n") + "\n"
 	var got []contracts.BackendEvent
-	tr, err := readTurn(bufio.NewReader(strings.NewReader(lines)), func(e contracts.BackendEvent) { got = append(got, e) })
+	tr, err := readTurn(context.Background(), bufio.NewReader(strings.NewReader(lines)), func(e contracts.BackendEvent) { got = append(got, e) }, nil, nil)
 	if err != nil || tr.Text != "response without delta" {
 		t.Fatalf("turn=%+v err=%v", tr, err)
 	}
@@ -120,14 +120,14 @@ func TestReadTurnHandlesHugeLine(t *testing.T) {
 	huge := strings.Repeat("x", 200_000)
 	input := `{"method":"item/agentMessage/delta","params":{"delta":"` + huge + `"}}` + "\n" +
 		`{"method":"turn/completed","params":{"turn":{"status":"completed"}}}` + "\n"
-	if _, err := readTurn(bufio.NewReader(strings.NewReader(input)), nil); err != nil {
+	if _, err := readTurn(context.Background(), bufio.NewReader(strings.NewReader(input)), nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func TestReadTurnReturnsJSONRPCError(t *testing.T) {
 	input := `{"id":3,"error":{"message":"turn rejected"}}` + "\n"
-	tr, err := readTurn(bufio.NewReader(strings.NewReader(input)), nil)
+	tr, err := readTurn(context.Background(), bufio.NewReader(strings.NewReader(input)), nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

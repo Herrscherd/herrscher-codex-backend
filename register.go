@@ -25,6 +25,11 @@ func init() {
 				{Key: "env", Env: "", Help: "per-session env injected at spawn (K=V per line); host-supplied, never from the environment"},
 			},
 			Models: Models,
+			// The app-server asks before each command and each patch, one request
+			// per call, so a rule written per tool is honoured as written. The
+			// exec transport has no such channel, which is why a session falling
+			// back to it is warned about rather than silently gated.
+			Capabilities: contracts.Capabilities{Gate: contracts.GrainTool},
 		},
 		Backend: func(ctx context.Context, cfg contracts.PluginConfig) (contracts.Backend, error) {
 			return NewBackend(ctx, Config{
