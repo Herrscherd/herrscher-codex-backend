@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/Herrscherd/herrscher-contracts"
 )
@@ -20,6 +21,9 @@ import (
 // approvals existed.
 type approver struct {
 	session, bin string
+	warn         io.Writer
+	warnMu       sync.Mutex
+	warned       map[string]bool
 	// ask runs one argv and returns its stdout. Injected so a test can answer
 	// without a daemon and without a binary on disk.
 	ask func(ctx context.Context, bin string, argv []string) ([]byte, error)
@@ -33,7 +37,7 @@ func newApprover(look func(string) string) *approver {
 	if !gated {
 		return nil
 	}
-	return &approver{session: session, bin: bin, ask: runApprove}
+	return &approver{session: session, bin: bin, ask: runApprove, warn: os.Stderr}
 }
 
 func runApprove(ctx context.Context, bin string, argv []string) ([]byte, error) {
@@ -136,10 +140,31 @@ func answerApproval(ctx context.Context, msg map[string]any, id any, ap *approve
 	params, _ := msg["params"].(map[string]any)
 	tool, subject, known := approvalSubject(method, params)
 	if !known {
+		ap.warnUnrecognisedApproval(method)
 		_ = respond(approvalResponse(id, true))
 		return
 	}
 	_ = respond(approvalResponse(id, ap.allow(ctx, tool, subject)))
+}
+
+func looksLikeApprovalRequest(method string) bool {
+	return strings.HasSuffix(method, "requestApproval") || strings.HasSuffix(method, "Approval")
+}
+
+func (a *approver) warnUnrecognisedApproval(method string) {
+	if a == nil || a.warn == nil || !looksLikeApprovalRequest(method) {
+		return
+	}
+	a.warnMu.Lock()
+	defer a.warnMu.Unlock()
+	if a.warned[method] {
+		return
+	}
+	if a.warned == nil {
+		a.warned = map[string]bool{}
+	}
+	a.warned[method] = true
+	fmt.Fprintf(a.warn, "herrscher: unrecognised approval request %q auto-accepted in session %q\n", method, a.session)
 }
 
 // approverFromEnv is the production constructor, kept apart from newApprover so

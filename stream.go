@@ -48,6 +48,16 @@ type streamResponder struct {
 	ap                 *approver         // answers codex's approval requests; nil = this session runs ungated
 	mu                 sync.Mutex
 	sess               *appSession
+	tokenMu            sync.Mutex
+	token              string
+}
+
+var errTurnNotStarted = errors.New("codex: app-server closed before any turn output")
+
+func (r *streamResponder) rememberToken(id string) {
+	r.tokenMu.Lock()
+	defer r.tokenMu.Unlock()
+	r.token = id
 }
 
 func (r *streamResponder) Respond(ctx context.Context, p contracts.Prompt, onEvent func(contracts.BackendEvent)) (string, error) {
@@ -59,12 +69,16 @@ func (r *streamResponder) Respond(ctx context.Context, p contracts.Prompt, onEve
 			return "", err
 		}
 		r.sess = s
+		r.rememberToken(s.threadID)
 	}
 	content := withContext(p.Context, withAttachments(p.Content, p.Attachments))
 	tr, err := r.sess.Send(ctx, content, onEvent)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return "", err
+		}
+		if !errors.Is(err, errTurnNotStarted) {
+			return "", fmt.Errorf("codex turn: %w", err)
 		}
 		if onEvent != nil {
 			onEvent(contracts.BackendEvent{Kind: "reset"})
@@ -76,6 +90,7 @@ func (r *streamResponder) Respond(ctx context.Context, p contracts.Prompt, onEve
 			return "", startErr
 		}
 		r.sess = s
+		r.rememberToken(s.threadID)
 		tr, err = r.sess.Send(ctx, content, onEvent)
 		if err != nil {
 			return "", err
@@ -92,14 +107,12 @@ func (r *streamResponder) Respond(ctx context.Context, p contracts.Prompt, onEve
 // the first turn it returns the id supplied at construction. Implements
 // contracts.ResumeAware.
 func (r *streamResponder) ResumeToken() string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.sess == nil {
+	r.tokenMu.Lock()
+	defer r.tokenMu.Unlock()
+	if r.token == "" {
 		return r.resumeID
 	}
-	r.sess.mu.Lock()
-	defer r.sess.mu.Unlock()
-	return r.sess.threadID
+	return r.token
 }
 
 func (r *streamResponder) Close() error {
@@ -324,7 +337,7 @@ func (s *appSession) Send(ctx context.Context, text string, onEvent func(contrac
 	id := s.nextID
 	s.nextID++
 	if err := s.write(turnStartRequest(id, s.threadID, text, s.model, s.effort)); err != nil {
-		return turnResult{}, err
+		return turnResult{}, errors.Join(errTurnNotStarted, err)
 	}
 	result := make(chan struct {
 		turn turnResult
@@ -352,11 +365,13 @@ func (s *appSession) Send(ctx context.Context, text string, onEvent func(contrac
 func readTurn(ctx context.Context, r *bufio.Reader, onEvent func(contracts.BackendEvent), ap *approver, respond func(map[string]any) error) (turnResult, error) {
 	var tr turnResult
 	var text strings.Builder
+	observed := false
 	for {
 		line, err := r.ReadBytes('\n')
 		if len(line) > 0 {
 			var msg map[string]any
 			if json.Unmarshal(line, &msg) == nil {
+				observed = true
 				if rpcErr, ok := msg["error"].(map[string]any); ok {
 					tr.IsError = true
 					tr.ErrMsg, _ = rpcErr["message"].(string)
@@ -382,7 +397,10 @@ func readTurn(ctx context.Context, r *bufio.Reader, onEvent func(contracts.Backe
 			}
 		}
 		if err != nil {
-			return tr, err
+			if !observed {
+				return tr, errors.Join(errTurnNotStarted, err)
+			}
+			return tr, fmt.Errorf("codex read turn: %w", err)
 		}
 	}
 }

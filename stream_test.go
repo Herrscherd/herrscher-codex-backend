@@ -208,3 +208,28 @@ func TestInitializeCtxAbortsOnCancel(t *testing.T) {
 		t.Fatal("initializeCtx did not honour a cancelled ctx")
 	}
 }
+
+func TestReadTurnDistinguishesAStartedTurnFromASilentServer(t *testing.T) {
+	cases := []struct {
+		name       string
+		stream     string
+		notStarted bool
+	}{
+		{name: "server closed before any output", stream: "", notStarted: true},
+		{name: "server died mid turn", stream: `{"method":"item/agentMessage/delta","params":{"delta":"hi"}}` + "\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := readTurn(context.Background(), bufio.NewReader(strings.NewReader(tc.stream)), nil, nil, func(map[string]any) error { return nil })
+			if err == nil {
+				t.Fatal("want an error")
+			}
+			if got := errors.Is(err, errTurnNotStarted); got != tc.notStarted {
+				t.Fatalf("errTurnNotStarted = %v, want %v (err=%v)", got, tc.notStarted, err)
+			}
+			if !errors.Is(err, io.EOF) {
+				t.Fatalf("underlying error lost: %v", err)
+			}
+		})
+	}
+}

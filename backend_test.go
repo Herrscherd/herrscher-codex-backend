@@ -162,3 +162,31 @@ func TestRunCmdVerboseStillPassesStderrThrough(t *testing.T) {
 		t.Fatalf("mirror = %q, buf = %q; both should see stderr", mirror.String(), buf.String())
 	}
 }
+
+func TestParseExecOutputPrefersAgentMessageOverATrailingFooter(t *testing.T) {
+	cases := []struct {
+		name string
+		out  string
+		want string
+	}{
+		{
+			name: "trailing footer after the agent message",
+			out: "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"final answer\"}}\n" +
+				"{\"type\":\"turn.completed\"}\n" +
+				"tokens used: 12043\n",
+			want: "final answer",
+		},
+		{
+			name: "plain text only",
+			out:  "tokens used: 12043\r\n",
+			want: "tokens used: 12043",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := parseExecOutput(tc.out); got != tc.want {
+				t.Fatalf("output=%q want=%q", got, tc.want)
+			}
+		})
+	}
+}
