@@ -127,13 +127,8 @@ func NewBackend(ctx context.Context, c Config) (contracts.Backend, error) {
 			gatewayHome: gatewayHome,
 		}, nil
 	case "stream":
-		base, commandModel, commandEffort := streamCommand(strings.Fields(c.Cmd))
-		if commandModel != "" {
-			c.Model = commandModel
-		}
-		if commandEffort != "" {
-			c.Effort = commandEffort
-		}
+		base, model, effort := commandOverrides(c.Cmd, c.Model, c.Effort)
+		c.Model, c.Effort = model, effort
 		// Codex app-server 0.145 can remain alive without completing turns on
 		// Windows. The normal exec transport is reliable there and preserves
 		// the same model/effort semantics, so prefer it until app-server is stable.
@@ -153,7 +148,7 @@ func NewBackend(ctx context.Context, c Config) (contracts.Backend, error) {
 	}
 }
 
-func oneShotCommand(cmd, model, effort string) (string, string, string) {
+func commandOverrides(cmd, model, effort string) ([]string, string, string) {
 	base, commandModel, commandEffort := streamCommand(strings.Fields(cmd))
 	if commandModel != "" {
 		model = commandModel
@@ -161,6 +156,11 @@ func oneShotCommand(cmd, model, effort string) (string, string, string) {
 	if commandEffort != "" {
 		effort = commandEffort
 	}
+	return base, model, effort
+}
+
+func oneShotCommand(cmd, model, effort string) (string, string, string) {
+	base, model, effort := commandOverrides(cmd, model, effort)
 	return strings.Join(base, " "), model, effort
 }
 
@@ -296,6 +296,7 @@ func execPrompt(content string) (argument, stdin string) {
 }
 
 func parseExecOutput(out string) string {
+	fallback := ""
 	for len(out) > 0 {
 		idx := strings.LastIndexByte(out, '\n')
 		raw := out[idx+1:]
@@ -318,9 +319,9 @@ func parseExecOutput(out string) string {
 		if json.Unmarshal([]byte(line), &ev) == nil && (ev.Item.Type == "agentMessage" || ev.Item.Type == "agent_message") && ev.Item.Text != "" {
 			return ev.Item.Text
 		}
-		if !strings.HasPrefix(line, "{") {
-			return raw
+		if !strings.HasPrefix(line, "{") && fallback == "" {
+			fallback = line
 		}
 	}
-	return ""
+	return fallback
 }

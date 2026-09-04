@@ -214,3 +214,31 @@ func TestReadTurnAnswersAnApprovalRequestMidTurn(t *testing.T) {
 		t.Fatalf("decision = %v, want decline", got)
 	}
 }
+
+func TestAnswerApprovalWarnsOnceOnUnrecognisedApprovalRequest(t *testing.T) {
+	cases := []struct {
+		name   string
+		method string
+		want   bool
+	}{
+		{name: "renamed approval request", method: "item/somethingNew/requestApproval", want: true},
+		{name: "legacy spelling", method: "someNewApproval", want: true},
+		{name: "not an approval request", method: "auth/loginCallback", want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var warned strings.Builder
+			a := &approver{session: "api", warn: &warned}
+			respond := func(map[string]any) error { return nil }
+			answerApproval(context.Background(), map[string]any{"method": tc.method}, 1, a, respond)
+			answerApproval(context.Background(), map[string]any{"method": tc.method}, 2, a, respond)
+			got := strings.Contains(warned.String(), tc.method)
+			if got != tc.want {
+				t.Fatalf("warned=%v want=%v (%q)", got, tc.want, warned.String())
+			}
+			if tc.want && strings.Count(warned.String(), "\n") != 1 {
+				t.Fatalf("want a single warning, got %q", warned.String())
+			}
+		})
+	}
+}
