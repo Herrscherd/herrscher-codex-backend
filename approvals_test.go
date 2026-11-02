@@ -5,6 +5,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -65,11 +67,43 @@ func TestAllowAsksTheDaemonAndReadsItsVerdict(t *testing.T) {
 	}
 }
 
-func TestAllowFailsOpen(t *testing.T) {
+func TestAllowDeclinesWhenTheApproverFails(t *testing.T) {
+	dir := t.TempDir()
+	failing := filepath.Join(dir, "failing")
+	if err := os.WriteFile(failing, []byte("#!/bin/sh\nexit 3\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	passing := filepath.Join(dir, "passing")
+	if err := os.WriteFile(passing, []byte("#!/bin/sh\nprintf '{\"decision\":\"allow\"}'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name      string
+		bin       string
+		cancelled bool
+	}{
+		{name: "the binary is missing", bin: filepath.Join(dir, "absent")},
+		{name: "the binary fails", bin: failing},
+		{name: "the context is cancelled", bin: passing, cancelled: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			if tc.cancelled {
+				cancel()
+			} else {
+				defer cancel()
+			}
+			a := &approver{session: "api", bin: tc.bin, ask: runApprove}
+			if a.allow(ctx, "Bash", "ls") {
+				t.Fatal("a gated session allowed a tool call its approver did not answer")
+			}
+		})
+	}
+}
+
+func TestAllowDeclinesWhenTheAnswerIsUnusable(t *testing.T) {
 	cases := map[string]func(context.Context, string, []string) ([]byte, error){
-		"the daemon could not be reached": func(context.Context, string, []string) ([]byte, error) {
-			return nil, context.DeadlineExceeded
-		},
 		"the answer was not json": func(context.Context, string, []string) ([]byte, error) {
 			return []byte("what"), nil
 		},
@@ -80,8 +114,8 @@ func TestAllowFailsOpen(t *testing.T) {
 	for name, ask := range cases {
 		t.Run(name, func(t *testing.T) {
 			a := &approver{session: "api", bin: "/opt/herrscher", ask: ask}
-			if !a.allow(context.Background(), "Bash", "ls") {
-				t.Fatal("an internal failure denied a tool call")
+			if a.allow(context.Background(), "Bash", "ls") {
+				t.Fatal("an unusable answer allowed a tool call in a gated session")
 			}
 		})
 	}
@@ -141,8 +175,8 @@ func TestAnswerApprovalAlwaysReplies(t *testing.T) {
 	if len(sent) != 2 {
 		t.Fatalf("sent %d replies, want 2", len(sent))
 	}
-	if got := mapField(sent[0], "result")["decision"]; got != "accept" {
-		t.Fatalf("unknown method answered %v, want accept", got)
+	if got := mapField(sent[0], "result")["decision"]; got != "decline" {
+		t.Fatalf("unknown method answered %v, want decline", got)
 	}
 	if got := mapField(sent[1], "result")["decision"]; got != "decline" {
 		t.Fatalf("denied command answered %v, want decline", got)
@@ -206,6 +240,31 @@ func TestReadTurnAnswersAnApprovalRequestMidTurn(t *testing.T) {
 	}
 	if got := mapField(sent[0], "result")["decision"]; got != "decline" {
 		t.Fatalf("decision = %v, want decline", got)
+	}
+}
+
+func TestUnrecognisedRequestIsDeclinedInAGatedSession(t *testing.T) {
+	for _, method := range []string{"item/somethingNew/requestApproval", "auth/loginCallback"} {
+		var sent []map[string]any
+		a := &approver{session: "api"}
+		respond := func(m map[string]any) error { sent = append(sent, m); return nil }
+		if err := answerApproval(context.Background(), map[string]any{"method": method}, 1, a, respond); err != nil {
+			t.Fatal(err)
+		}
+		if got := mapField(sent[0], "result")["decision"]; got != "decline" {
+			t.Fatalf("%s answered %v, want decline", method, got)
+		}
+	}
+}
+
+func TestUnrecognisedRequestIsAcceptedWhenUngated(t *testing.T) {
+	var sent []map[string]any
+	respond := func(m map[string]any) error { sent = append(sent, m); return nil }
+	if err := answerApproval(context.Background(), map[string]any{"method": "item/somethingNew/requestApproval"}, 1, nil, respond); err != nil {
+		t.Fatal(err)
+	}
+	if got := mapField(sent[0], "result")["decision"]; got != "accept" {
+		t.Fatalf("ungated session answered %v, want accept", got)
 	}
 }
 

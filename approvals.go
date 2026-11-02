@@ -3,6 +3,7 @@ package codex
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -35,10 +36,24 @@ func runApprove(ctx context.Context, bin string, argv []string) ([]byte, error) 
 	return exec.CommandContext(ctx, bin, argv...).Output()
 }
 
+var (
+	errVerdictUnreadable = errors.New("the approver answer is not a verdict")
+	errVerdictMissing    = errors.New("the approver answer names no decision")
+)
+
 func (a *approver) allow(ctx context.Context, tool, subject string) bool {
 	if a == nil {
 		return true
 	}
+	decision, err := a.decide(ctx, tool, subject)
+	if err != nil {
+		slog.Error("approval declined: the approver did not answer", "session", a.session, "tool", tool, "error", err)
+		return false
+	}
+	return decision == "allow"
+}
+
+func (a *approver) decide(ctx context.Context, tool, subject string) (string, error) {
 	out, err := a.ask(ctx, a.bin, []string{
 		"approve", "ask",
 		"--session", a.session,
@@ -46,15 +61,18 @@ func (a *approver) allow(ctx context.Context, tool, subject string) bool {
 		"--subject", subject,
 	})
 	if err != nil {
-		return true
+		return "", err
 	}
 	var verdict struct {
 		Decision string `json:"decision"`
 	}
-	if json.Unmarshal(out, &verdict) != nil || verdict.Decision == "" {
-		return true
+	if err := json.Unmarshal(out, &verdict); err != nil {
+		return "", fmt.Errorf("%w: %w", errVerdictUnreadable, err)
 	}
-	return verdict.Decision == "allow"
+	if verdict.Decision == "" {
+		return "", errVerdictMissing
+	}
+	return verdict.Decision, nil
 }
 
 type approvalRequest struct {
@@ -92,15 +110,22 @@ func approvalPolicy(gated bool) string {
 	return "never"
 }
 
-func answerApproval(ctx context.Context, msg map[string]any, requestID any, approvals *approver, respond func(map[string]any) error) error {
+func answerApproval(ctx context.Context, msg map[string]any, requestID any, approvals *approver, respondHoldingSendLock func(map[string]any) error) error {
 	method := stringField(msg, fieldMethod)
 	params := mapField(msg, "params")
 	request, known := approvalSubject(method, params)
 	if !known {
-		approvals.warnUnrecognisedApproval(method)
-		return respond(approvalResponse(requestID, true))
+		return respondHoldingSendLock(approvalResponse(requestID, approvals.unrecognisedAllowed(method)))
 	}
-	return respond(approvalResponse(requestID, approvals.allow(ctx, request.tool, request.subject)))
+	return respondHoldingSendLock(approvalResponse(requestID, approvals.allow(ctx, request.tool, request.subject)))
+}
+
+func (a *approver) unrecognisedAllowed(method string) bool {
+	if a == nil {
+		return true
+	}
+	a.warnUnrecognisedApproval(method)
+	return false
 }
 
 func looksLikeApprovalRequest(method string) bool {
@@ -120,7 +145,7 @@ func (a *approver) warnUnrecognisedApproval(method string) {
 		a.warned = make(map[string]bool)
 	}
 	a.warned[method] = true
-	writeWarning(a.warn, fmt.Sprintf("herrscher: unrecognised approval request %q auto-accepted in session %q\n", method, a.session))
+	writeWarning(a.warn, fmt.Sprintf("herrscher: unrecognised approval request %q declined in session %q\n", method, a.session))
 }
 
 func approverFromEnv() *approver { return newApprover(os.Getenv) }
