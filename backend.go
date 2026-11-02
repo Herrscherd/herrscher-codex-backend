@@ -49,6 +49,13 @@ var (
 	errUnknownKind  = errors.New("unknown backend kind")
 )
 
+func discardGatewayHome(gatewayHome string, err error) error {
+	if gatewayHome == "" {
+		return err
+	}
+	return errors.Join(err, os.RemoveAll(gatewayHome))
+}
+
 func checkGatewayPair(env map[string]string) error {
 	if env[contracts.EnvOpenAIBaseURL] == "" {
 		return nil
@@ -80,10 +87,7 @@ func NewBackend(ctx context.Context, cfg Config) (contracts.Backend, error) {
 		cfg.Env = env
 	}
 	fail := func(err error) (contracts.Backend, error) {
-		if gatewayHome != "" {
-			return nil, errors.Join(err, os.RemoveAll(gatewayHome))
-		}
-		return nil, err
+		return nil, discardGatewayHome(gatewayHome, err)
 	}
 	approvals := approverFromEnv()
 	kind := resolveBackend(cfg.Kind, cfg.Stream)

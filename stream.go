@@ -340,7 +340,9 @@ func (s *appSession) initializeCtx(ctx context.Context, resume string) error {
 		return err
 	case <-ctx.Done():
 		s.abort()
-		<-done
+		if initErr := <-done; initErr != nil {
+			slog.Debug("initialize ended with the aborted session", "error", initErr)
+		}
 		return ctx.Err()
 	}
 }
@@ -398,7 +400,8 @@ func readTurn(ctx context.Context, reader *bufio.Reader, onEvent func(contracts.
 
 func (c *turnCollector) consumeLine(ctx context.Context, line []byte, approvals *approver, respond func(map[string]any) error) (turnResult, bool, error) {
 	var msg map[string]any
-	if json.Unmarshal(line, &msg) != nil {
+	if err := json.Unmarshal(line, &msg); err != nil {
+		slog.Debug("skipping a line from codex that is not a JSON object", "error", err)
 		return turnResult{}, false, nil
 	}
 	c.observed = true

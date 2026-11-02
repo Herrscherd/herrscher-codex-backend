@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os/exec"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -247,6 +248,7 @@ var errCloseFailed = errors.New("close failed")
 
 type countingCloser struct {
 	io.Reader
+
 	calls int
 }
 
@@ -358,5 +360,30 @@ func closeChecked(t *testing.T, closer io.Closer) {
 	t.Helper()
 	if err := closer.Close(); err != nil {
 		t.Errorf("close: %v", err)
+	}
+}
+
+func TestStopProcessReportsAWaitFailureOtherThanAnExit(t *testing.T) {
+	cmd := exec.CommandContext(context.Background(), "sh", "-c", "exit 0")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	session := &appSession{cmd: cmd}
+	if err := session.stopProcess(); err == nil {
+		t.Fatal("stopProcess hid a Wait failure that is not an exit status")
+	}
+}
+
+func TestStopProcessIgnoresTheExitStatusOfTheChild(t *testing.T) {
+	cmd := exec.CommandContext(context.Background(), "sh", "-c", "exit 3")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	session := &appSession{cmd: cmd}
+	if err := session.stopProcess(); err != nil {
+		t.Fatalf("stopProcess = %v, want nil for a child stopped on Close", err)
 	}
 }

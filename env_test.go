@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	contracts "github.com/Herrscherd/herrscher-contracts"
 )
@@ -94,19 +93,6 @@ func TestOneShotKeepsItsOwnVariables(t *testing.T) {
 	}
 }
 
-func waitForProbeFile(t *testing.T, path string) string {
-	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if b, err := os.ReadFile(path); err == nil {
-			return string(b)
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	t.Fatalf("probe file %s never appeared within the deadline", path)
-	return ""
-}
-
 func TestStreamSpawnAppliesInjectedEnv(t *testing.T) {
 	const probeVar = "NEUBLOX_STREAM_PROBE"
 
@@ -122,8 +108,11 @@ func TestStreamSpawnAppliesInjectedEnv(t *testing.T) {
 		if err == nil {
 			defer closeChecked(t, sess)
 		}
-		got := waitForProbeFile(t, probeFile)
-		if got != "injected-stream-value" {
+		got, err := os.ReadFile(probeFile)
+		if err != nil {
+			t.Fatalf("the child never wrote its probe file: %v", err)
+		}
+		if string(got) != "injected-stream-value" {
 			t.Fatalf("probe file contains %q, want %q", got, "injected-stream-value")
 		}
 	})
@@ -141,8 +130,11 @@ func TestStreamSpawnAppliesInjectedEnv(t *testing.T) {
 		if err == nil {
 			defer closeChecked(t, sess)
 		}
-		got := waitForProbeFile(t, probeFile)
-		if got != "ABSENT" {
+		got, err := os.ReadFile(probeFile)
+		if err != nil {
+			t.Fatalf("the child never wrote its probe file: %v", err)
+		}
+		if string(got) != "ABSENT" {
 			t.Fatalf("probe variable leaked into the child environment with nil injection: %q", got)
 		}
 	})

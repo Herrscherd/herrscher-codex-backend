@@ -2,6 +2,8 @@ package codex
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -331,4 +333,38 @@ func tempCodexHomes(t *testing.T) int {
 		t.Fatalf("glob: %v", err)
 	}
 	return len(m)
+}
+
+func TestDiscardGatewayHomeJoinsARemovalFailure(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root removes a directory whatever its parent's mode")
+	}
+	parent := t.TempDir()
+	home := filepath.Join(parent, "home")
+	if err := os.Mkdir(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(parent, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(parent, 0o700); err != nil {
+			t.Error(err)
+		}
+	})
+	cause := errors.New("the backend refused to start")
+	err := discardGatewayHome(home, cause)
+	if !errors.Is(err, cause) {
+		t.Fatalf("err = %v, want the original failure kept", err)
+	}
+	if !errors.Is(err, fs.ErrPermission) {
+		t.Fatalf("err = %v, want the removal failure joined to it", err)
+	}
+}
+
+func TestDiscardGatewayHomeKeepsTheErrorWithoutAHome(t *testing.T) {
+	cause := errors.New("the backend refused to start")
+	if got := discardGatewayHome("", cause); !errors.Is(got, cause) {
+		t.Fatalf("got %v, want the original error", got)
+	}
 }
