@@ -56,13 +56,13 @@ var (
 	errNoThreadID = errors.New("codex app-server returned no thread id")
 )
 
-func (r *streamResponder) rememberToken(id string) {
+func (r *streamResponder) rememberToken(threadID string) {
 	r.tokenMu.Lock()
 	defer r.tokenMu.Unlock()
-	r.token = id
+	r.token = threadID
 }
 
-func (r *streamResponder) Respond(ctx context.Context, p contracts.Prompt, onEvent func(contracts.BackendEvent)) (string, error) {
+func (r *streamResponder) Respond(ctx context.Context, prompt contracts.Prompt, onEvent func(contracts.BackendEvent)) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.sess == nil {
@@ -70,29 +70,29 @@ func (r *streamResponder) Respond(ctx context.Context, p contracts.Prompt, onEve
 			return "", err
 		}
 	}
-	content := withContext(p.Context, withAttachments(p.Content, p.Attachments))
-	tr, err := r.sess.Send(ctx, content, onEvent)
+	content := withContext(prompt.Context, withAttachments(prompt.Content, prompt.Attachments))
+	result, err := r.sess.Send(ctx, content, onEvent)
 	if err != nil {
 		if !restartable(err) {
 			return "", turnError(err)
 		}
-		if tr, err = r.reopen(ctx, content, onEvent); err != nil {
+		if result, err = r.reopen(ctx, content, onEvent); err != nil {
 			return "", err
 		}
 	}
-	if tr.IsError {
-		return tr.Text, fmt.Errorf("%w: %s", errTurnFailed, tr.ErrMsg)
+	if result.IsError {
+		return result.Text, fmt.Errorf("%w: %s", errTurnFailed, result.ErrMsg)
 	}
-	return tr.Text, nil
+	return result.Text, nil
 }
 
 func (r *streamResponder) open(ctx context.Context, resume string) error {
-	s, err := r.start(ctx, resume)
+	session, err := r.start(ctx, resume)
 	if err != nil {
 		return err
 	}
-	r.sess = s
-	r.rememberToken(s.threadID)
+	r.sess = session
+	r.rememberToken(session.threadID)
 	return nil
 }
 
@@ -200,18 +200,18 @@ type appSession struct {
 }
 
 func newAppSession(stdin io.WriteCloser, out io.Reader) *appSession {
-	s := &appSession{stdin: stdin, out: bufio.NewReader(out), nextID: 1}
+	session := &appSession{stdin: stdin, out: bufio.NewReader(out), nextID: 1}
 	if c, ok := out.(io.Closer); ok {
-		s.outClose = c
+		session.outClose = c
 	}
-	return s
+	return session
 }
 
 func initializeRequest(id int) map[string]any {
 	return map[string]any{"id": id, fieldMethod: "initialize", fieldParams: map[string]any{"clientInfo": map[string]any{"name": "herrscher_codex_backend", "title": "Herrscher Codex Backend", "version": "0.1.0"}}}
 }
 
-func threadStartRequest(id int, model, dir, resume string) map[string]any {
+func threadStartRequest(requestID int, model, dir, resume string) map[string]any {
 	params := make(map[string]any)
 	if model != "" {
 		params["model"] = model
@@ -220,12 +220,12 @@ func threadStartRequest(id int, model, dir, resume string) map[string]any {
 		params["cwd"] = dir
 	}
 	if resume != "" {
-		return map[string]any{"id": id, fieldMethod: "thread/resume", fieldParams: map[string]any{"threadId": resume}}
+		return map[string]any{"id": requestID, fieldMethod: "thread/resume", fieldParams: map[string]any{"threadId": resume}}
 	}
-	return map[string]any{"id": id, fieldMethod: "thread/start", fieldParams: params}
+	return map[string]any{"id": requestID, fieldMethod: "thread/start", fieldParams: params}
 }
 
-func turnStartRequest(id int, thread, text, model, effort string) map[string]any {
+func turnStartRequest(requestID int, thread, text, model, effort string) map[string]any {
 	params := map[string]any{"threadId": thread, "input": []any{map[string]any{"type": contentText, fieldText: text}}}
 	if model != "" {
 		params["model"] = model
@@ -233,26 +233,26 @@ func turnStartRequest(id int, thread, text, model, effort string) map[string]any
 	if effort != "" {
 		params["effort"] = effort
 	}
-	return map[string]any{"id": id, fieldMethod: "turn/start", fieldParams: params}
+	return map[string]any{"id": requestID, fieldMethod: "turn/start", fieldParams: params}
 }
 
 func (s *appSession) write(msg map[string]any) error {
-	b, err := json.Marshal(msg)
+	payload, err := json.Marshal(msg)
 	if err != nil {
 		return err
 	}
-	b = append(b, '\n')
-	_, err = s.stdin.Write(b)
+	payload = append(payload, '\n')
+	_, err = s.stdin.Write(payload)
 	return err
 }
 
-func (s *appSession) waitResponse(id int) (map[string]any, error) {
+func (s *appSession) waitResponse(requestID int) (map[string]any, error) {
 	for {
 		line, err := s.out.ReadBytes('\n')
 		if len(line) > 0 {
 			var msg map[string]any
 			if json.Unmarshal(line, &msg) == nil {
-				if n, ok := msg["id"].(float64); ok && int(n) == id {
+				if n, ok := msg["id"].(float64); ok && int(n) == requestID {
 					return msg, nil
 				}
 			}
@@ -267,20 +267,20 @@ func (s *appSession) initialize(resume string) error {
 	if err := s.write(initializeRequest(s.nextID)); err != nil {
 		return err
 	}
-	id := s.nextID
+	requestID := s.nextID
 	s.nextID++
-	if _, err := s.waitResponse(id); err != nil {
+	if _, err := s.waitResponse(requestID); err != nil {
 		return err
 	}
 	if err := s.write(map[string]any{fieldMethod: "initialized", fieldParams: make(map[string]any)}); err != nil {
 		return err
 	}
-	id = s.nextID
+	requestID = s.nextID
 	s.nextID++
-	if err := s.write(threadStartRequest(id, s.model, s.dir, resume)); err != nil {
+	if err := s.write(threadStartRequest(requestID, s.model, s.dir, resume)); err != nil {
 		return err
 	}
-	msg, err := s.waitResponse(id)
+	msg, err := s.waitResponse(requestID)
 	if err != nil {
 		return err
 	}
@@ -296,8 +296,8 @@ func (s *appSession) initialize(resume string) error {
 	return nil
 }
 
-func startAppSession(procCtx, callCtx context.Context, base []string, model, effort, dir string, verbose bool, resume string, env map[string]string, ap *approver) (*appSession, error) {
-	argv := appServerArgv(base, ap != nil)
+func startAppSession(procCtx, callCtx context.Context, base []string, model, effort, dir string, verbose bool, resume string, env map[string]string, approvals *approver) (*appSession, error) {
+	argv := appServerArgv(base, approvals != nil)
 	cmd := exec.CommandContext(procCtx, argv[0], argv[1:]...)
 	cmd.Dir = dir
 	cmd.Env = contracts.MergeEnv(os.Environ(), env)
@@ -306,7 +306,7 @@ func startAppSession(procCtx, callCtx context.Context, base []string, model, eff
 	} else {
 		cmd.Stderr = io.Discard
 	}
-	in, err := cmd.StdinPipe()
+	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
 	}
@@ -317,19 +317,19 @@ func startAppSession(procCtx, callCtx context.Context, base []string, model, eff
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
-	s := newAppSession(in, out)
-	s.cmd = cmd
-	s.model = model
-	s.effort = effort
-	s.dir = dir
-	s.ap = ap
-	if err := s.initializeCtx(callCtx, resume); err != nil {
-		if closeErr := s.Close(); closeErr != nil {
+	session := newAppSession(stdin, out)
+	session.cmd = cmd
+	session.model = model
+	session.effort = effort
+	session.dir = dir
+	session.ap = approvals
+	if err := session.initializeCtx(callCtx, resume); err != nil {
+		if closeErr := session.Close(); closeErr != nil {
 			return nil, errors.Join(err, closeErr)
 		}
 		return nil, err
 	}
-	return s, nil
+	return session, nil
 }
 
 func (s *appSession) initializeCtx(ctx context.Context, resume string) error {
@@ -353,9 +353,9 @@ func (s *appSession) Send(ctx context.Context, text string, onEvent func(contrac
 		return turnResult{}, ctx.Err()
 	default:
 	}
-	id := s.nextID
+	requestID := s.nextID
 	s.nextID++
-	if err := s.write(turnStartRequest(id, s.threadID, text, s.model, s.effort)); err != nil {
+	if err := s.write(turnStartRequest(requestID, s.threadID, text, s.model, s.effort)); err != nil {
 		return turnResult{}, errors.Join(errTurnNotStarted, err)
 	}
 	result := make(chan turnOutcome, 1)
@@ -380,23 +380,23 @@ type turnCollector struct {
 	observed bool
 }
 
-func readTurn(ctx context.Context, r *bufio.Reader, onEvent func(contracts.BackendEvent), ap *approver, respond func(map[string]any) error) (turnResult, error) {
-	c := &turnCollector{onEvent: onEvent}
+func readTurn(ctx context.Context, reader *bufio.Reader, onEvent func(contracts.BackendEvent), approvals *approver, respond func(map[string]any) error) (turnResult, error) {
+	collector := &turnCollector{onEvent: onEvent}
 	for {
-		line, err := r.ReadBytes('\n')
+		line, err := reader.ReadBytes('\n')
 		if len(line) > 0 {
-			result, done, handleErr := c.consumeLine(ctx, line, ap, respond)
+			result, done, handleErr := collector.consumeLine(ctx, line, approvals, respond)
 			if done || handleErr != nil {
 				return result, handleErr
 			}
 		}
 		if err != nil {
-			return c.readFailure(err)
+			return collector.readFailure(err)
 		}
 	}
 }
 
-func (c *turnCollector) consumeLine(ctx context.Context, line []byte, ap *approver, respond func(map[string]any) error) (turnResult, bool, error) {
+func (c *turnCollector) consumeLine(ctx context.Context, line []byte, approvals *approver, respond func(map[string]any) error) (turnResult, bool, error) {
 	var msg map[string]any
 	if json.Unmarshal(line, &msg) != nil {
 		return turnResult{}, false, nil
@@ -406,7 +406,7 @@ func (c *turnCollector) consumeLine(ctx context.Context, line []byte, ap *approv
 		return c.reject(rpcErr), true, nil
 	}
 	if isServerRequest(msg) {
-		return turnResult{}, false, answerApproval(ctx, msg, msg["id"], ap, respond)
+		return turnResult{}, false, answerApproval(ctx, msg, msg["id"], approvals, respond)
 	}
 	c.handleAppEvent(msg)
 	if c.finished() {

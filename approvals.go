@@ -77,12 +77,12 @@ func approvalSubject(method string, params map[string]any) (approvalRequest, boo
 	return approvalRequest{}, false
 }
 
-func approvalResponse(id any, allow bool) map[string]any {
+func approvalResponse(requestID any, allow bool) map[string]any {
 	decision := "decline"
 	if allow {
 		decision = "accept"
 	}
-	return map[string]any{"id": id, fieldResult: map[string]any{"decision": decision}}
+	return map[string]any{"id": requestID, fieldResult: map[string]any{"decision": decision}}
 }
 
 func approvalPolicy(gated bool) string {
@@ -92,15 +92,15 @@ func approvalPolicy(gated bool) string {
 	return "never"
 }
 
-func answerApproval(ctx context.Context, msg map[string]any, id any, ap *approver, respond func(map[string]any) error) error {
+func answerApproval(ctx context.Context, msg map[string]any, requestID any, approvals *approver, respond func(map[string]any) error) error {
 	method := stringField(msg, fieldMethod)
 	params := mapField(msg, "params")
 	request, known := approvalSubject(method, params)
 	if !known {
-		ap.warnUnrecognisedApproval(method)
-		return respond(approvalResponse(id, true))
+		approvals.warnUnrecognisedApproval(method)
+		return respond(approvalResponse(requestID, true))
 	}
-	return respond(approvalResponse(id, ap.allow(ctx, request.tool, request.subject)))
+	return respond(approvalResponse(requestID, approvals.allow(ctx, request.tool, request.subject)))
 }
 
 func looksLikeApprovalRequest(method string) bool {
@@ -125,11 +125,11 @@ func (a *approver) warnUnrecognisedApproval(method string) {
 
 func approverFromEnv() *approver { return newApprover(os.Getenv) }
 
-func warnOneShotUngated(ap *approver, w io.Writer) {
-	if ap == nil {
+func warnOneShotUngated(approvals *approver, diagnostics io.Writer) {
+	if approvals == nil {
 		return
 	}
-	writeWarning(w, fmt.Sprintf("herrscher: codex exec has no approval channel, so session %q runs ungated on this path\n", ap.session))
+	writeWarning(diagnostics, fmt.Sprintf("herrscher: codex exec has no approval channel, so session %q runs ungated on this path\n", approvals.session))
 }
 
 func writeWarning(w io.Writer, message string) {

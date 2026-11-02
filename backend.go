@@ -61,23 +61,23 @@ func checkGatewayPair(env map[string]string) error {
 }
 
 // NewBackend builds a configured Codex backend.
-func NewBackend(ctx context.Context, c Config) (contracts.Backend, error) {
-	if err := checkGatewayPair(c.Env); err != nil {
+func NewBackend(ctx context.Context, cfg Config) (contracts.Backend, error) {
+	if err := checkGatewayPair(cfg.Env); err != nil {
 		return nil, err
 	}
 	var gatewayHome string
-	if base := c.Env[contracts.EnvOpenAIBaseURL]; base != "" {
+	if base := cfg.Env[contracts.EnvOpenAIBaseURL]; base != "" {
 		home, err := writeGatewayHome(os.TempDir(), base)
 		if err != nil {
 			return nil, err
 		}
 		gatewayHome = home
-		env := make(map[string]string, len(c.Env)+1)
-		for k, v := range c.Env {
+		env := make(map[string]string, len(cfg.Env)+1)
+		for k, v := range cfg.Env {
 			env[k] = v
 		}
 		env["CODEX_HOME"] = home
-		c.Env = env
+		cfg.Env = env
 	}
 	fail := func(err error) (contracts.Backend, error) {
 		if gatewayHome != "" {
@@ -85,36 +85,36 @@ func NewBackend(ctx context.Context, c Config) (contracts.Backend, error) {
 		}
 		return nil, err
 	}
-	ap := approverFromEnv()
-	kind := resolveBackend(c.Kind, c.Stream)
+	approvals := approverFromEnv()
+	kind := resolveBackend(cfg.Kind, cfg.Stream)
 	switch kind {
 	case kindOneShot:
-		warnOneShotUngated(ap, os.Stderr)
-		spec := commandOverrides(c.Cmd, c.Model, c.Effort)
+		warnOneShotUngated(approvals, os.Stderr)
+		spec := commandOverrides(cfg.Cmd, cfg.Model, cfg.Effort)
 		cmd := strings.Join(spec.argv, " ")
 		if cmd == "" {
 			return fail(errOneShotNoCmd)
 		}
 		return &oneShotResponder{
 			run: func(ctx context.Context, p contracts.Prompt) (string, error) {
-				return runCmd(ctx, cmd, spec.model, spec.effort, c.Dir, c.Verbose, c.Env, p)
+				return runCmd(ctx, cmd, spec.model, spec.effort, cfg.Dir, cfg.Verbose, cfg.Env, p)
 			},
 			gatewayHome: gatewayHome,
 		}, nil
 	case kindStream:
-		spec := commandOverrides(c.Cmd, c.Model, c.Effort)
-		c.Model, c.Effort = spec.model, spec.effort
+		spec := commandOverrides(cfg.Cmd, cfg.Model, cfg.Effort)
+		cfg.Model, cfg.Effort = spec.model, spec.effort
 		if runtime.GOOS == "windows" && os.Getenv("HERRSCHER_CODEX_ONESHOT_WINDOWS") == "1" {
-			warnOneShotUngated(ap, os.Stderr)
+			warnOneShotUngated(approvals, os.Stderr)
 			cmd := strings.Join(streamBase(spec.argv), " ")
 			return &oneShotResponder{
 				run: func(ctx context.Context, p contracts.Prompt) (string, error) {
-					return runCmd(ctx, cmd, c.Model, c.Effort, c.Dir, c.Verbose, c.Env, p)
+					return runCmd(ctx, cmd, cfg.Model, cfg.Effort, cfg.Dir, cfg.Verbose, cfg.Env, p)
 				},
 				gatewayHome: gatewayHome,
 			}, nil
 		}
-		responder := &streamResponder{base: streamBase(spec.argv), model: c.Model, effort: c.Effort, dir: c.Dir, verbose: c.Verbose, resumeID: c.ResumeID, env: c.Env, gatewayHome: gatewayHome, ap: ap}
+		responder := &streamResponder{base: streamBase(spec.argv), model: cfg.Model, effort: cfg.Effort, dir: cfg.Dir, verbose: cfg.Verbose, resumeID: cfg.ResumeID, env: cfg.Env, gatewayHome: gatewayHome, ap: approvals}
 		responder.start = responder.launchedWithin(ctx)
 		return responder, nil
 	default:
@@ -141,22 +141,22 @@ func commandOverrides(cmd, model, effort string) commandSpec {
 
 func streamCommand(fields []string) commandSpec {
 	var spec commandSpec
-	for i := 0; i < len(fields); i++ {
-		switch fields[i] {
+	for index := 0; index < len(fields); index++ {
+		switch fields[index] {
 		case "--model", "-m":
-			if i+1 < len(fields) {
-				spec.model = fields[i+1]
-				i++
+			if index+1 < len(fields) {
+				spec.model = fields[index+1]
+				index++
 				continue
 			}
 		case "--effort":
-			if i+1 < len(fields) {
-				spec.effort = fields[i+1]
-				i++
+			if index+1 < len(fields) {
+				spec.effort = fields[index+1]
+				index++
 				continue
 			}
 		}
-		spec.argv = append(spec.argv, fields[i])
+		spec.argv = append(spec.argv, fields[index])
 	}
 	return spec
 }
@@ -172,18 +172,18 @@ type boundedBuffer struct {
 	dropped int
 }
 
-func (b *boundedBuffer) Write(p []byte) (int, error) {
+func (b *boundedBuffer) Write(data []byte) (int, error) {
 	if room := b.limit - len(b.buf); room > 0 {
-		if len(p) <= room {
-			b.buf = append(b.buf, p...)
-			return len(p), nil
+		if len(data) <= room {
+			b.buf = append(b.buf, data...)
+			return len(data), nil
 		}
-		b.buf = append(b.buf, p[:room]...)
-		b.dropped += len(p) - room
-		return len(p), nil
+		b.buf = append(b.buf, data[:room]...)
+		b.dropped += len(data) - room
+		return len(data), nil
 	}
-	b.dropped += len(p)
-	return len(p), nil
+	b.dropped += len(data)
+	return len(data), nil
 }
 
 func (b *boundedBuffer) String() string {
@@ -193,22 +193,22 @@ func (b *boundedBuffer) String() string {
 	return string(b.buf)
 }
 
-func runCmd(ctx context.Context, cmdStr, model, effort, dir string, verbose bool, env map[string]string, p contracts.Prompt) (string, error) {
+func runCmd(ctx context.Context, cmdStr, model, effort, dir string, verbose bool, env map[string]string, prompt contracts.Prompt) (string, error) {
 	fields := strings.Fields(cmdStr)
 	if len(fields) == 0 {
 		return "", errEmptyCommand
 	}
-	content := withContext(p.Context, withAttachments(p.Content, p.Attachments))
+	content := withContext(prompt.Context, withAttachments(prompt.Content, prompt.Attachments))
 	args := append(execArgs(fields, model, effort), stdinPromptArg)
 	cmd := exec.CommandContext(ctx, fields[0], args...)
 	cmd.Dir = dir
 	cmd.Stdin = strings.NewReader(content)
 	cmd.Env = contracts.MergeEnv(append(os.Environ(),
-		"DCTL_MSG="+p.Content,
-		"DCTL_AUTHOR="+p.Author,
-		"DCTL_MESSAGE_ID="+p.MessageID,
-		"DCTL_CHANNEL="+p.ChannelID,
-		"DCTL_ATTACHMENTS="+strings.Join(p.Attachments, string(os.PathListSeparator)),
+		"DCTL_MSG="+prompt.Content,
+		"DCTL_AUTHOR="+prompt.Author,
+		"DCTL_MESSAGE_ID="+prompt.MessageID,
+		"DCTL_CHANNEL="+prompt.ChannelID,
+		"DCTL_ATTACHMENTS="+strings.Join(prompt.Attachments, string(os.PathListSeparator)),
 	), env)
 	errBuf := &boundedBuffer{limit: stderrCaptureLimit}
 	if verbose {
@@ -257,15 +257,15 @@ func parseExecOutput(out string) string {
 		if line == "" {
 			continue
 		}
-		var ev struct {
+		var event struct {
 			Type string `json:"type"`
 			Item struct {
 				Type string `json:"type"`
 				Text string `json:"text"`
 			} `json:"item"`
 		}
-		if json.Unmarshal([]byte(line), &ev) == nil && (ev.Item.Type == "agentMessage" || ev.Item.Type == "agent_message") && ev.Item.Text != "" {
-			return ev.Item.Text
+		if json.Unmarshal([]byte(line), &event) == nil && (event.Item.Type == "agentMessage" || event.Item.Type == "agent_message") && event.Item.Text != "" {
+			return event.Item.Text
 		}
 		if !strings.HasPrefix(line, "{") && fallback == "" {
 			fallback = line
