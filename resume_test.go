@@ -15,12 +15,10 @@ type nopWriteCloser struct{ io.Writer }
 func (nopWriteCloser) Close() error { return nil }
 
 func TestStreamResponderResumeToken(t *testing.T) {
-	// Before the first turn, the token is whatever was passed in at construction.
 	r := &streamResponder{resumeID: "boot-id"}
 	if got := r.ResumeToken(); got != "boot-id" {
 		t.Fatalf("nil session: want boot-id, got %q", got)
 	}
-	// Once a session exists, the live codex thread id wins.
 	r.sess = newAppSession(nopWriteCloser{io.Discard}, strings.NewReader(""))
 	r.sess.threadID = "thread-1"
 	r.rememberToken("thread-1")
@@ -29,7 +27,7 @@ func TestStreamResponderResumeToken(t *testing.T) {
 	}
 }
 
-func TestStreamResponderIsResumeAware(t *testing.T) {
+func TestStreamResponderIsResumeAware(_ *testing.T) {
 	var _ contracts.ResumeAware = (*streamResponder)(nil)
 }
 

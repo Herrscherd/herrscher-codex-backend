@@ -3,6 +3,7 @@ package codex
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -10,7 +11,7 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/Herrscherd/herrscher-contracts"
+	contracts "github.com/Herrscherd/herrscher-contracts"
 )
 
 // Config configures a Codex backend.
@@ -22,7 +23,7 @@ type Config struct {
 	Effort   string
 	Dir      string
 	Verbose  bool
-	ResumeID string // codex thread id to resume on first start ("" = fresh)
+	ResumeID string
 
 	// Env is injected into the child process's environment at every spawn. It
 	// carries gateway credentials and is NEVER persisted or logged: that is
@@ -35,185 +36,158 @@ func resolveBackend(kind string, stream bool) string {
 		return kind
 	}
 	if stream {
-		return "stream"
+		return kindStream
 	}
-	return "oneshot"
+	return kindOneShot
 }
 
-// checkGatewayPair refuses a spawn whose environment carries a gateway base
-// URL without the token that goes with it.
-//
-// A base URL alone routes the turn through the gateway while the CLI
-// authenticates with whatever login the machine already has: the session runs
-// on the user's own subscription, which is the shape we are not allowed to
-// produce. For codex the degraded spawn is even quieter than for claude — the
-// generated config.toml only REFERENCES the token by env_key, so an absent or
-// blank one yields a provider that authenticates as nobody and fails far from
-// its cause.
-//
-// The host's contracts.GatewayCreds already makes the half-pair
-// unrepresentable, but this backend is a separate module reached through a
-// plain map[string]string, so a host bug or an "env" setting from elsewhere
-// would walk straight through. Defence in depth; the correct failure is a
-// refusal to spawn, never a degraded spawn.
+var errGatewayPairRefused = errors.New("refusing to spawn")
+
+var (
+	errOneShotNoCmd = errors.New("oneshot backend requires a non-empty Cmd")
+	errEmptyCommand = errors.New("empty Codex command")
+	errUnknownKind  = errors.New("unknown backend kind")
+)
+
+func discardGatewayHome(gatewayHome string, err error) error {
+	if gatewayHome == "" {
+		return err
+	}
+	return errors.Join(err, os.RemoveAll(gatewayHome))
+}
+
 func checkGatewayPair(env map[string]string) error {
 	if env[contracts.EnvOpenAIBaseURL] == "" {
 		return nil
 	}
 	if strings.TrimSpace(env[contracts.EnvNeubloxToken]) == "" {
-		return fmt.Errorf("refusing to spawn: %s is set without %s; the session would run on the machine's own subscription while being routed through the gateway",
-			contracts.EnvOpenAIBaseURL, contracts.EnvNeubloxToken)
+		return fmt.Errorf("%w: %s is set without %s; the session would run on the machine's own subscription while being routed through the gateway",
+			errGatewayPairRefused, contracts.EnvOpenAIBaseURL, contracts.EnvNeubloxToken)
 	}
 	return nil
 }
 
-// NewBackend builds a configured Codex backend.
-func NewBackend(ctx context.Context, c Config) (contracts.Backend, error) {
-	// Before anything is created on disk: a half-pair must not even reach
-	// writeGatewayHome.
-	if err := checkGatewayPair(c.Env); err != nil {
+// NewBackend builds a configured Codex backend. ctx must not be nil.
+func NewBackend(ctx context.Context, cfg Config) (contracts.Backend, error) {
+	if err := checkGatewayPair(cfg.Env); err != nil {
 		return nil, err
 	}
-	// A gateway route is present when the host injected OPENAI_BASE_URL.
-	// Unlike the claude CLI, codex is not driven by environment variables
-	// alone: it needs a custom provider declared in config.toml under
-	// CODEX_HOME. Materialize a per-spawn disposable one and point CODEX_HOME
-	// at it. The map is copied rather than mutated in place: c.Env comes from
-	// the host and may be shared across multiple NewBackend calls. gatewayHome
-	// is non-empty only on this route, and is the directory the returned
-	// responder must remove when its session ends (see oneShotResponder and
-	// streamResponder Close in stream.go).
 	var gatewayHome string
-	if base := c.Env[contracts.EnvOpenAIBaseURL]; base != "" {
+	if base := cfg.Env[contracts.EnvOpenAIBaseURL]; base != "" {
 		home, err := writeGatewayHome(os.TempDir(), base)
 		if err != nil {
 			return nil, err
 		}
 		gatewayHome = home
-		env := make(map[string]string, len(c.Env)+1)
-		for k, v := range c.Env {
+		env := make(map[string]string, len(cfg.Env)+1)
+		for k, v := range cfg.Env {
 			env[k] = v
 		}
 		env["CODEX_HOME"] = home
-		c.Env = env
+		cfg.Env = env
 	}
-	// Every failure below has to remove a CODEX_HOME already created: the
-	// directory is owned by the responder that gets returned, and on an error
-	// path no responder is returned, so nothing would ever remove it. The host
-	// retries a misconfigured gateway session, which would otherwise leave one
-	// /tmp/codex-home-* behind per attempt for the daemon's lifetime.
 	fail := func(err error) (contracts.Backend, error) {
-		if gatewayHome != "" {
-			_ = os.RemoveAll(gatewayHome)
-		}
-		return nil, err
+		return nil, discardGatewayHome(gatewayHome, err)
 	}
-	// Read once per backend: the spawn environment is fixed for the process's
-	// lifetime, and asking again mid-turn could only ever answer differently
-	// from what codex was started with.
-	ap := approverFromEnv()
-	kind := resolveBackend(c.Kind, c.Stream)
+	approvals := approverFromEnv()
+	kind := resolveBackend(cfg.Kind, cfg.Stream)
 	switch kind {
-	case "oneshot":
-		warnOneShotUngated(ap, os.Stderr)
-		cmd, model, effort := oneShotCommand(c.Cmd, c.Model, c.Effort)
+	case kindOneShot:
+		warnOneShotUngated(approvals, os.Stderr)
+		spec := commandOverrides(cfg.Cmd, cfg.Model, cfg.Effort)
+		cmd := strings.Join(spec.argv, " ")
 		if cmd == "" {
-			return fail(fmt.Errorf("oneshot backend requires a non-empty Cmd"))
+			return fail(errOneShotNoCmd)
 		}
 		return &oneShotResponder{
 			run: func(ctx context.Context, p contracts.Prompt) (string, error) {
-				return runCmd(ctx, cmd, model, effort, c.Dir, c.Verbose, c.Env, p)
+				return runCmd(ctx, cmd, spec.model, spec.effort, cfg.Dir, cfg.Verbose, cfg.Env, p)
 			},
-			gatewayHome: gatewayHome,
+			gatewayHomeRemovedOnClose: gatewayHome,
 		}, nil
-	case "stream":
-		base, model, effort := commandOverrides(c.Cmd, c.Model, c.Effort)
-		c.Model, c.Effort = model, effort
-		// Codex app-server 0.145 can remain alive without completing turns on
-		// Windows. The normal exec transport is reliable there and preserves
-		// the same model/effort semantics, so prefer it until app-server is stable.
+	case kindStream:
+		spec := commandOverrides(cfg.Cmd, cfg.Model, cfg.Effort)
+		cfg.Model, cfg.Effort = spec.model, spec.effort
 		if runtime.GOOS == "windows" && os.Getenv("HERRSCHER_CODEX_ONESHOT_WINDOWS") == "1" {
-			warnOneShotUngated(ap, os.Stderr)
-			cmd := strings.Join(streamBase(base), " ")
+			warnOneShotUngated(approvals, os.Stderr)
+			cmd := strings.Join(streamBase(spec.argv), " ")
 			return &oneShotResponder{
 				run: func(ctx context.Context, p contracts.Prompt) (string, error) {
-					return runCmd(ctx, cmd, c.Model, c.Effort, c.Dir, c.Verbose, c.Env, p)
+					return runCmd(ctx, cmd, cfg.Model, cfg.Effort, cfg.Dir, cfg.Verbose, cfg.Env, p)
 				},
-				gatewayHome: gatewayHome,
+				gatewayHomeRemovedOnClose: gatewayHome,
 			}, nil
 		}
-		return &streamResponder{ctx: ctx, base: streamBase(base), model: c.Model, effort: c.Effort, dir: c.Dir, verbose: c.Verbose, resumeID: c.ResumeID, env: c.Env, gatewayHome: gatewayHome, ap: ap}, nil
+		responder := &streamResponder{base: streamBase(spec.argv), model: cfg.Model, effort: cfg.Effort, dir: cfg.Dir, verbose: cfg.Verbose, resumeID: cfg.ResumeID, env: cfg.Env, gatewayHomeRemovedOnClose: gatewayHome, approvalsIfGated: approvals}
+		responder.start = responder.launchedWithin(ctx)
+		return responder, nil
 	default:
-		return fail(fmt.Errorf("unknown backend kind %q", kind))
+		return fail(fmt.Errorf("%w %q", errUnknownKind, kind))
 	}
 }
 
-func commandOverrides(cmd, model, effort string) ([]string, string, string) {
-	base, commandModel, commandEffort := streamCommand(strings.Fields(cmd))
-	if commandModel != "" {
-		model = commandModel
-	}
-	if commandEffort != "" {
-		effort = commandEffort
-	}
-	return base, model, effort
+type commandSpec struct {
+	argv   []string
+	model  string
+	effort string
 }
 
-func oneShotCommand(cmd, model, effort string) (string, string, string) {
-	base, model, effort := commandOverrides(cmd, model, effort)
-	return strings.Join(base, " "), model, effort
+func commandOverrides(cmd, model, effort string) commandSpec {
+	spec := streamCommand(strings.Fields(cmd))
+	if spec.model == "" {
+		spec.model = model
+	}
+	if spec.effort == "" {
+		spec.effort = effort
+	}
+	return spec
 }
 
-// streamCommand separates turn configuration from the executable argv. Model
-// and effort belong to app-server RPC requests; leaving them before
-// "app-server" makes the Codex CLI reject the command and close stdout.
-func streamCommand(fields []string) (base []string, model, effort string) {
-	for i := 0; i < len(fields); i++ {
-		switch fields[i] {
+func streamCommand(fields []string) commandSpec {
+	var spec commandSpec
+	for index := 0; index < len(fields); index++ {
+		switch fields[index] {
 		case "--model", "-m":
-			if i+1 < len(fields) {
-				model = fields[i+1]
-				i++
+			if index+1 < len(fields) {
+				spec.model = fields[index+1]
+				index++
 				continue
 			}
 		case "--effort":
-			if i+1 < len(fields) {
-				effort = fields[i+1]
-				i++
+			if index+1 < len(fields) {
+				spec.effort = fields[index+1]
+				index++
 				continue
 			}
 		}
-		base = append(base, fields[i])
+		spec.argv = append(spec.argv, fields[index])
 	}
-	return base, model, effort
+	return spec
 }
 
-// stderrCaptureLimit bounds how much child stderr is retained for error
-// reporting. 8 KiB is far more than any codex diagnostic needs while keeping a
-// runaway process from ballooning memory; the overflow is dropped and marked.
-const stderrCaptureLimit = 8 << 10
+const (
+	stderrCaptureLimit = 8 << 10
+	stdinPromptArg     = "-"
+)
 
-// boundedBuffer accumulates at most limit bytes and reports the drop. Writes
-// past the limit are discarded rather than failing, so the child never sees a
-// short write / broken pipe just because its stderr got noisy.
 type boundedBuffer struct {
 	limit   int
 	buf     []byte
 	dropped int
 }
 
-func (b *boundedBuffer) Write(p []byte) (int, error) {
+func (b *boundedBuffer) Write(data []byte) (int, error) {
 	if room := b.limit - len(b.buf); room > 0 {
-		if len(p) <= room {
-			b.buf = append(b.buf, p...)
-			return len(p), nil
+		if len(data) <= room {
+			b.buf = append(b.buf, data...)
+			return len(data), nil
 		}
-		b.buf = append(b.buf, p[:room]...)
-		b.dropped += len(p) - room
-		return len(p), nil
+		b.buf = append(b.buf, data[:room]...)
+		b.dropped += len(data) - room
+		return len(data), nil
 	}
-	b.dropped += len(p)
-	return len(p), nil
+	b.dropped += len(data)
+	return len(data), nil
 }
 
 func (b *boundedBuffer) String() string {
@@ -223,32 +197,23 @@ func (b *boundedBuffer) String() string {
 	return string(b.buf)
 }
 
-// runCmd executes cmdStr (the codex CLI plus flags) as a one-shot exec. env is
-// merged over the daemon's inherited environment plus this call's own DCTL_*
-// variables (see contracts.MergeEnv): with no injection, the child process
-// environment is unchanged.
-func runCmd(ctx context.Context, cmdStr, model, effort, dir string, verbose bool, env map[string]string, p contracts.Prompt) (string, error) {
+func runCmd(ctx context.Context, cmdStr, model, effort, dir string, verbose bool, env map[string]string, prompt contracts.Prompt) (string, error) {
 	fields := strings.Fields(cmdStr)
 	if len(fields) == 0 {
-		return "", fmt.Errorf("empty Codex command")
+		return "", errEmptyCommand
 	}
-	content := withContext(p.Context, withAttachments(p.Content, p.Attachments))
-	args := execArgs(fields, model, effort)
-	promptArg, promptStdin := execPrompt(content)
-	args = append(args, promptArg)
+	content := withContext(prompt.Context, withAttachments(prompt.Content, prompt.Attachments))
+	args := append(execArgs(fields, model, effort), stdinPromptArg)
 	cmd := exec.CommandContext(ctx, fields[0], args...)
 	cmd.Dir = dir
-	cmd.Stdin = strings.NewReader(promptStdin)
+	cmd.Stdin = strings.NewReader(content)
 	cmd.Env = contracts.MergeEnv(append(os.Environ(),
-		"DCTL_MSG="+p.Content,
-		"DCTL_AUTHOR="+p.Author,
-		"DCTL_MESSAGE_ID="+p.MessageID,
-		"DCTL_CHANNEL="+p.ChannelID,
-		"DCTL_ATTACHMENTS="+strings.Join(p.Attachments, string(os.PathListSeparator)),
+		"DCTL_MSG="+prompt.Content,
+		"DCTL_AUTHOR="+prompt.Author,
+		"DCTL_MESSAGE_ID="+prompt.MessageID,
+		"DCTL_CHANNEL="+prompt.ChannelID,
+		"DCTL_ATTACHMENTS="+strings.Join(prompt.Attachments, string(os.PathListSeparator)),
 	), env)
-	// Capture stderr so a failing codex CLI reports its own diagnostic instead of
-	// a bare exit status. cmd.Output() only fills ExitError.Stderr when Stderr is
-	// nil, and we need the verbose passthrough, so capture it explicitly.
 	errBuf := &boundedBuffer{limit: stderrCaptureLimit}
 	if verbose {
 		cmd.Stderr = io.MultiWriter(os.Stderr, errBuf)
@@ -257,27 +222,31 @@ func runCmd(ctx context.Context, cmdStr, model, effort, dir string, verbose bool
 	}
 	out, err := cmd.Output()
 	if err != nil {
-		if detail := strings.TrimSpace(errBuf.String()); detail != "" {
-			return parseExecOutput(string(out)), fmt.Errorf("codex exec failed: %w: %s", err, detail)
-		}
-		return parseExecOutput(string(out)), fmt.Errorf("codex exec failed: %w", err)
+		return parseExecOutput(string(out)), &execError{cause: err, stderr: strings.TrimSpace(errBuf.String())}
 	}
 	return parseExecOutput(string(out)), nil
+}
+
+type execError struct {
+	cause  error
+	stderr string
+}
+
+func (e *execError) Error() string {
+	if e.stderr == "" {
+		return fmt.Sprintf("codex exec failed: %v", e.cause)
+	}
+	return fmt.Sprintf("codex exec failed: %v: %s", e.cause, e.stderr)
+}
+
+func (e *execError) Unwrap() error {
+	return e.cause
 }
 
 func execArgs(fields []string, model, effort string) []string {
 	args := append([]string{}, fields[1:]...)
 	args = append(args,
 		"exec", "--json",
-		// Headless: there is no human to answer approval prompts, so the agent
-		// runs non-interactively, and `codex exec` has no channel to ask on: it
-		// reads a prompt and writes a transcript, with no request an approver
-		// could answer. That is why this one is not derived from the policy, and
-		// why a gated session on this path is warned about rather than gated.
-		// sandbox_mode bounds what that permits: file
-		// and command execution stay confined to the worktree, and escalation is
-		// refused rather than blindly run. The neublox MCP is the one surface we
-		// explicitly trust to auto-approve.
 		"-c", `approval_policy="never"`,
 		"-c", `sandbox_mode="workspace-write"`,
 		"-c", `mcp_servers.neublox.default_tools_approval_mode="approve"`,
@@ -291,13 +260,9 @@ func execArgs(fields []string, model, effort string) []string {
 	return args
 }
 
-func execPrompt(content string) (argument, stdin string) {
-	return "-", content
-}
-
 func parseExecOutput(out string) string {
 	fallback := ""
-	for len(out) > 0 {
+	for out != "" {
 		idx := strings.LastIndexByte(out, '\n')
 		raw := out[idx+1:]
 		if idx < 0 {
@@ -309,15 +274,15 @@ func parseExecOutput(out string) string {
 		if line == "" {
 			continue
 		}
-		var ev struct {
+		var event struct {
 			Type string `json:"type"`
 			Item struct {
 				Type string `json:"type"`
 				Text string `json:"text"`
 			} `json:"item"`
 		}
-		if json.Unmarshal([]byte(line), &ev) == nil && (ev.Item.Type == "agentMessage" || ev.Item.Type == "agent_message") && ev.Item.Text != "" {
-			return ev.Item.Text
+		if json.Unmarshal([]byte(line), &event) == nil && (event.Item.Type == "agentMessage" || event.Item.Type == "agent_message") && event.Item.Text != "" {
+			return event.Item.Text
 		}
 		if !strings.HasPrefix(line, "{") && fallback == "" {
 			fallback = line

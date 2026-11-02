@@ -7,23 +7,20 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"regexp"
 	"strings"
 	"sync"
 
-	"github.com/Herrscherd/herrscher-contracts"
+	contracts "github.com/Herrscherd/herrscher-contracts"
 )
 
 type oneShotResponder struct {
 	run func(context.Context, contracts.Prompt) (string, error)
 
-	// gatewayHome is the per-spawn CODEX_HOME directory created by
-	// writeGatewayHome for a gateway route ("" on the native route). Close
-	// removes it so a long-running host does not leak one directory per
-	// session.
-	gatewayHome string
+	gatewayHomeRemovedOnClose string
 }
 
 func (o *oneShotResponder) Respond(ctx context.Context, p contracts.Prompt, _ func(contracts.BackendEvent)) (string, error) {
@@ -31,81 +28,103 @@ func (o *oneShotResponder) Respond(ctx context.Context, p contracts.Prompt, _ fu
 }
 
 func (o *oneShotResponder) Close() error {
-	if o.gatewayHome == "" {
+	if o.gatewayHomeRemovedOnClose == "" {
 		return nil
 	}
-	return os.RemoveAll(o.gatewayHome)
+	return os.RemoveAll(o.gatewayHomeRemovedOnClose)
 }
 
 type streamResponder struct {
-	ctx                context.Context
-	base               []string
-	model, effort, dir string
-	verbose            bool
-	resumeID           string            // thread id to resume on the FIRST start ("" = fresh)
-	env                map[string]string // injected into the child process at every (re)spawn
-	gatewayHome        string            // per-spawn CODEX_HOME to remove on Close ("" on the native route)
-	ap                 *approver         // answers codex's approval requests; nil = this session runs ungated
-	mu                 sync.Mutex
-	sess               *appSession
-	tokenMu            sync.Mutex
-	token              string
+	start                     func(turnCtx context.Context, resume string) (*appSession, error)
+	base                      []string
+	model, effort, dir        string
+	verbose                   bool
+	resumeID                  string
+	env                       map[string]string
+	gatewayHomeRemovedOnClose string
+	approvalsIfGated          *approver
+	mu                        sync.Mutex
+	sess                      *appSession
+	tokenMu                   sync.Mutex
+	token                     string
 }
 
 var errTurnNotStarted = errors.New("codex: app-server closed before any turn output")
 
-func (r *streamResponder) rememberToken(id string) {
+var (
+	errTurnFailed = errors.New("codex turn failed")
+	errNoThreadID = errors.New("codex app-server returned no thread id")
+)
+
+func (r *streamResponder) rememberToken(threadID string) {
 	r.tokenMu.Lock()
 	defer r.tokenMu.Unlock()
-	r.token = id
+	r.token = threadID
 }
 
-func (r *streamResponder) Respond(ctx context.Context, p contracts.Prompt, onEvent func(contracts.BackendEvent)) (string, error) {
+func (r *streamResponder) Respond(ctx context.Context, prompt contracts.Prompt, onEvent func(contracts.BackendEvent)) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.sess == nil {
-		s, err := startAppSession(r.ctx, ctx, r.base, r.model, r.effort, r.dir, r.verbose, r.resumeID, r.env, r.ap)
-		if err != nil {
+		if err := r.open(ctx, r.resumeID); err != nil {
 			return "", err
 		}
-		r.sess = s
-		r.rememberToken(s.threadID)
 	}
-	content := withContext(p.Context, withAttachments(p.Content, p.Attachments))
-	tr, err := r.sess.Send(ctx, content, onEvent)
+	content := withContext(prompt.Context, withAttachments(prompt.Content, prompt.Attachments))
+	result, err := r.sess.Send(ctx, content, onEvent)
 	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return "", err
+		if !restartable(err) {
+			return "", turnError(err)
 		}
-		if !errors.Is(err, errTurnNotStarted) {
-			return "", fmt.Errorf("codex turn: %w", err)
-		}
-		if onEvent != nil {
-			onEvent(contracts.BackendEvent{Kind: "reset"})
-		}
-		resume := r.sess.threadID
-		_ = r.sess.Close()
-		s, startErr := startAppSession(r.ctx, ctx, r.base, r.model, r.effort, r.dir, r.verbose, resume, r.env, r.ap)
-		if startErr != nil {
-			return "", startErr
-		}
-		r.sess = s
-		r.rememberToken(s.threadID)
-		tr, err = r.sess.Send(ctx, content, onEvent)
-		if err != nil {
+		if result, err = r.reopen(ctx, content, onEvent); err != nil {
 			return "", err
 		}
 	}
-	if tr.IsError {
-		return tr.Text, fmt.Errorf("codex turn failed: %s", tr.ErrMsg)
+	if result.IsError {
+		return result.Text, fmt.Errorf("%w: %s", errTurnFailed, result.ErrMsg)
 	}
-	return tr.Text, nil
+	return result.Text, nil
 }
 
-// ResumeToken returns the backend's current codex thread id — the stable id for
-// this conversation, for the host to persist and pass back via --resume. Before
-// the first turn it returns the id supplied at construction. Implements
-// contracts.ResumeAware.
+func (r *streamResponder) open(ctx context.Context, resume string) error {
+	session, err := r.start(ctx, resume)
+	if err != nil {
+		return err
+	}
+	r.sess = session
+	r.rememberToken(session.threadID)
+	return nil
+}
+
+func (r *streamResponder) reopen(ctx context.Context, content string, onEvent func(contracts.BackendEvent)) (turnResult, error) {
+	if onEvent != nil {
+		onEvent(contracts.BackendEvent{Kind: "reset"})
+	}
+	resume := r.sess.threadID
+	if closeErr := r.sess.Close(); closeErr != nil {
+		slog.Warn("previous app-server session did not close cleanly", "error", closeErr)
+	}
+	if err := r.open(ctx, resume); err != nil {
+		return turnResult{}, err
+	}
+	return r.sess.Send(ctx, content, onEvent)
+}
+
+func restartable(err error) bool {
+	return errors.Is(err, errTurnNotStarted) && !isContextError(err)
+}
+
+func turnError(err error) error {
+	if isContextError(err) {
+		return err
+	}
+	return fmt.Errorf("codex turn: %w", err)
+}
+
+func isContextError(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
 func (r *streamResponder) ResumeToken() string {
 	r.tokenMu.Lock()
 	defer r.tokenMu.Unlock()
@@ -122,27 +141,29 @@ func (r *streamResponder) Close() error {
 	if r.sess != nil {
 		sessErr = r.sess.Close()
 	}
-	if r.gatewayHome != "" {
-		if err := os.RemoveAll(r.gatewayHome); err != nil && sessErr == nil {
-			return err
-		}
+	var homeErr error
+	if r.gatewayHomeRemovedOnClose != "" {
+		homeErr = os.RemoveAll(r.gatewayHomeRemovedOnClose)
 	}
-	return sessErr
+	return errors.Join(sessErr, homeErr)
 }
 
 func streamBase(fields []string) []string {
 	if len(fields) == 0 {
-		return []string{"codex"}
+		return []string{codexName}
 	}
 	return fields
 }
+
+func (r *streamResponder) launchedWithin(lifetime context.Context) func(context.Context, string) (*appSession, error) {
+	return func(turnCtx context.Context, resume string) (*appSession, error) {
+		return startAppSession(lifetime, turnCtx, r.base, r.model, r.effort, r.dir, r.verbose, resume, r.env, r.approvalsIfGated)
+	}
+}
+
 func appServerArgv(base []string, gated bool) []string {
 	argv := append([]string{}, base...)
 	argv = append(argv,
-		// See execArgs: headless runs non-interactively, sandbox_mode bounds the
-		// blast radius to the worktree, neublox MCP is the one trusted surface.
-		// Under a policy the agent asks instead of deciding alone, which is what
-		// makes the requests this session answers ever arrive.
 		"-c", `approval_policy="`+approvalPolicy(gated)+`"`,
 		"-c", `sandbox_mode="workspace-write"`,
 		"-c", `mcp_servers.neublox.default_tools_approval_mode="approve"`,
@@ -158,6 +179,11 @@ type turnResult struct {
 	completed bool
 }
 
+type turnOutcome struct {
+	turn turnResult
+	err  error
+}
+
 type appSession struct {
 	mu                 sync.Mutex
 	stdin              io.WriteCloser
@@ -167,25 +193,25 @@ type appSession struct {
 	threadID           string
 	model, effort, dir string
 	nextID             int
-	// ap answers codex's approval requests. nil = this session was spawned with
-	// no policy in force, and codex was started with approval_policy="never", so
-	// no request ever arrives to answer.
-	ap *approver
+	approvalsIfGated   *approver
+	closeOnce          sync.Once
+	closeErr           error
 }
 
 func newAppSession(stdin io.WriteCloser, out io.Reader) *appSession {
-	s := &appSession{stdin: stdin, out: bufio.NewReader(out), nextID: 1}
+	session := &appSession{stdin: stdin, out: bufio.NewReader(out), nextID: 1}
 	if c, ok := out.(io.Closer); ok {
-		s.outClose = c
+		session.outClose = c
 	}
-	return s
+	return session
 }
 
 func initializeRequest(id int) map[string]any {
-	return map[string]any{"id": id, "method": "initialize", "params": map[string]any{"clientInfo": map[string]any{"name": "herrscher_codex_backend", "title": "Herrscher Codex Backend", "version": "0.1.0"}}}
+	return map[string]any{"id": id, fieldMethod: "initialize", fieldParams: map[string]any{"clientInfo": map[string]any{"name": "herrscher_codex_backend", "title": "Herrscher Codex Backend", "version": "0.1.0"}}}
 }
-func threadStartRequest(id int, model, dir, resume string) map[string]any {
-	params := map[string]any{}
+
+func threadStartRequest(requestID int, model, dir, resume string) map[string]any {
+	params := make(map[string]any)
 	if model != "" {
 		params["model"] = model
 	}
@@ -193,37 +219,39 @@ func threadStartRequest(id int, model, dir, resume string) map[string]any {
 		params["cwd"] = dir
 	}
 	if resume != "" {
-		return map[string]any{"id": id, "method": "thread/resume", "params": map[string]any{"threadId": resume}}
+		return map[string]any{"id": requestID, fieldMethod: "thread/resume", fieldParams: map[string]any{"threadId": resume}}
 	}
-	return map[string]any{"id": id, "method": "thread/start", "params": params}
+	return map[string]any{"id": requestID, fieldMethod: "thread/start", fieldParams: params}
 }
-func turnStartRequest(id int, thread, text, model, effort string) map[string]any {
-	params := map[string]any{"threadId": thread, "input": []any{map[string]any{"type": "text", "text": text}}}
+
+func turnStartRequest(requestID int, thread, text, model, effort string) map[string]any {
+	params := map[string]any{"threadId": thread, "input": []any{map[string]any{"type": contentText, fieldText: text}}}
 	if model != "" {
 		params["model"] = model
 	}
 	if effort != "" {
 		params["effort"] = effort
 	}
-	return map[string]any{"id": id, "method": "turn/start", "params": params}
+	return map[string]any{"id": requestID, fieldMethod: "turn/start", fieldParams: params}
 }
 
 func (s *appSession) write(msg map[string]any) error {
-	b, err := json.Marshal(msg)
+	payload, err := json.Marshal(msg)
 	if err != nil {
 		return err
 	}
-	b = append(b, '\n')
-	_, err = s.stdin.Write(b)
+	payload = append(payload, '\n')
+	_, err = s.stdin.Write(payload)
 	return err
 }
-func (s *appSession) waitResponse(id int) (map[string]any, error) {
+
+func (s *appSession) waitResponse(requestID int) (map[string]any, error) {
 	for {
 		line, err := s.out.ReadBytes('\n')
 		if len(line) > 0 {
 			var msg map[string]any
 			if json.Unmarshal(line, &msg) == nil {
-				if n, ok := msg["id"].(float64); ok && int(n) == id {
+				if n, ok := msg["id"].(float64); ok && int(n) == requestID {
 					return msg, nil
 				}
 			}
@@ -233,48 +261,43 @@ func (s *appSession) waitResponse(id int) (map[string]any, error) {
 		}
 	}
 }
+
 func (s *appSession) initialize(resume string) error {
 	if err := s.write(initializeRequest(s.nextID)); err != nil {
 		return err
 	}
-	id := s.nextID
+	requestID := s.nextID
 	s.nextID++
-	if _, err := s.waitResponse(id); err != nil {
+	if _, err := s.waitResponse(requestID); err != nil {
 		return err
 	}
-	if err := s.write(map[string]any{"method": "initialized", "params": map[string]any{}}); err != nil {
+	if err := s.write(map[string]any{fieldMethod: "initialized", fieldParams: make(map[string]any)}); err != nil {
 		return err
 	}
-	id = s.nextID
+	requestID = s.nextID
 	s.nextID++
-	if err := s.write(threadStartRequest(id, s.model, s.dir, resume)); err != nil {
+	if err := s.write(threadStartRequest(requestID, s.model, s.dir, resume)); err != nil {
 		return err
 	}
-	msg, err := s.waitResponse(id)
+	msg, err := s.waitResponse(requestID)
 	if err != nil {
 		return err
 	}
-	result, _ := msg["result"].(map[string]any)
-	thread, _ := result["thread"].(map[string]any)
-	s.threadID, _ = thread["id"].(string)
+	result := mapField(msg, fieldResult)
+	thread := mapField(result, "thread")
+	s.threadID = stringField(thread, "id")
 	if s.threadID == "" {
 		s.threadID = resume
 	}
 	if s.threadID == "" {
-		return fmt.Errorf("codex app-server returned no thread id")
+		return errNoThreadID
 	}
 	return nil
 }
 
-// startAppSession spawns the app-server bound to procCtx (its lifetime spans
-// turns) and runs the initialize handshake bound to callCtx (the current turn).
-// A cancelled turn aborts a stalled handshake instead of blocking forever on a
-// silent app-server. env is merged over the daemon's inherited environment
-// (see contracts.MergeEnv): with no injection, the child process environment
-// is unchanged.
-func startAppSession(procCtx, callCtx context.Context, base []string, model, effort, dir string, verbose bool, resume string, env map[string]string, ap *approver) (*appSession, error) {
-	argv := appServerArgv(base, ap != nil)
-	cmd := exec.CommandContext(procCtx, argv[0], argv[1:]...)
+func startAppSession(lifetimeCtx, turnCtx context.Context, base []string, model, effort, dir string, verbose bool, resume string, env map[string]string, approvals *approver) (*appSession, error) {
+	argv := appServerArgv(base, approvals != nil)
+	cmd := exec.CommandContext(lifetimeCtx, argv[0], argv[1:]...)
 	cmd.Dir = dir
 	cmd.Env = contracts.MergeEnv(os.Environ(), env)
 	if verbose {
@@ -282,7 +305,7 @@ func startAppSession(procCtx, callCtx context.Context, base []string, model, eff
 	} else {
 		cmd.Stderr = io.Discard
 	}
-	in, err := cmd.StdinPipe()
+	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
 	}
@@ -293,182 +316,237 @@ func startAppSession(procCtx, callCtx context.Context, base []string, model, eff
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
-	s := newAppSession(in, out)
-	s.cmd = cmd
-	s.model = model
-	s.effort = effort
-	s.dir = dir
-	s.ap = ap
-	if err := s.initializeCtx(callCtx, resume); err != nil {
-		_ = s.Close()
+	session := newAppSession(stdin, out)
+	session.cmd = cmd
+	session.model = model
+	session.effort = effort
+	session.dir = dir
+	session.approvalsIfGated = approvals
+	if err := session.initializeWithinTurn(turnCtx, resume); err != nil {
+		if closeErr := session.Close(); closeErr != nil {
+			return nil, errors.Join(err, closeErr)
+		}
 		return nil, err
 	}
-	return s, nil
+	return session, nil
 }
 
-// initializeCtx runs the blocking initialize handshake in a goroutine and
-// abandons it when callCtx is cancelled. The caller Closes the session on
-// error, which kills the process and unblocks the goroutine's pending read.
-func (s *appSession) initializeCtx(ctx context.Context, resume string) error {
-	if ctx == nil {
-		return s.initialize(resume)
-	}
+func (s *appSession) initializeWithinTurn(ctx context.Context, resume string) error {
 	done := make(chan error, 1)
 	go func() { done <- s.initialize(resume) }()
 	select {
 	case err := <-done:
 		return err
 	case <-ctx.Done():
+		s.abortAndJoinHandshake(done)
 		return ctx.Err()
+	}
+}
+
+func (s *appSession) abortAndJoinHandshake(done <-chan error) {
+	s.abort()
+	if initErr := <-done; initErr != nil {
+		slog.Debug("initialize ended with the aborted session", "error", initErr)
 	}
 }
 
 func (s *appSession) Send(ctx context.Context, text string, onEvent func(contracts.BackendEvent)) (turnResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	select {
 	case <-ctx.Done():
 		return turnResult{}, ctx.Err()
 	default:
 	}
-	id := s.nextID
+	requestID := s.nextID
 	s.nextID++
-	if err := s.write(turnStartRequest(id, s.threadID, text, s.model, s.effort)); err != nil {
+	if err := s.write(turnStartRequest(requestID, s.threadID, text, s.model, s.effort)); err != nil {
 		return turnResult{}, errors.Join(errTurnNotStarted, err)
 	}
-	result := make(chan struct {
-		turn turnResult
-		err  error
-	}, 1)
+	result := make(chan turnOutcome, 1)
 	go func() {
-		tr, err := readTurn(ctx, s.out, onEvent, s.ap, s.write)
-		result <- struct {
-			turn turnResult
-			err  error
-		}{tr, err}
+		tr, err := readTurn(ctx, s.out, onEvent, s.approvalsIfGated, s.write)
+		result <- turnOutcome{turn: tr, err: err}
 	}()
 	select {
 	case done := <-result:
 		return done.turn, done.err
 	case <-ctx.Done():
-		_ = s.abort()
+		s.abort()
+		<-result
 		return turnResult{}, ctx.Err()
 	}
 }
 
-// respond writes one reply back to the app-server. It is s.write at the only
-// call site, which is safe despite running in readTurn's goroutine: Send holds
-// s.mu for the whole turn, so there is exactly one writer at a time.
-func readTurn(ctx context.Context, r *bufio.Reader, onEvent func(contracts.BackendEvent), ap *approver, respond func(map[string]any) error) (turnResult, error) {
-	var tr turnResult
-	var text strings.Builder
-	observed := false
+type turnCollector struct {
+	onEvent  func(contracts.BackendEvent)
+	result   turnResult
+	deltas   strings.Builder
+	observed bool
+}
+
+func readTurn(ctx context.Context, reader *bufio.Reader, onEvent func(contracts.BackendEvent), approvals *approver, respondHoldingSendLock func(map[string]any) error) (turnResult, error) {
+	collector := &turnCollector{onEvent: onEvent}
 	for {
-		line, err := r.ReadBytes('\n')
+		line, err := reader.ReadBytes('\n')
 		if len(line) > 0 {
-			var msg map[string]any
-			if json.Unmarshal(line, &msg) == nil {
-				observed = true
-				if rpcErr, ok := msg["error"].(map[string]any); ok {
-					tr.IsError = true
-					tr.ErrMsg, _ = rpcErr["message"].(string)
-					if tr.ErrMsg == "" {
-						tr.ErrMsg = "Codex rejected the turn"
-					}
-					if onEvent != nil {
-						onEvent(contracts.BackendEvent{Kind: "result", IsError: true})
-					}
-					return tr, nil
-				}
-				if id, ok := msg["id"]; ok && msg["method"] != nil {
-					answerApproval(ctx, msg, id, ap, respond)
-					continue
-				}
-				handleAppEvent(msg, &tr, &text, onEvent)
-			}
-			if tr.IsError || tr.completed {
-				if tr.Text == "" {
-					tr.Text = text.String()
-				}
-				return tr, nil
+			result, done, handleErr := collector.consumeLine(ctx, line, approvals, respondHoldingSendLock)
+			if done || handleErr != nil {
+				return result, handleErr
 			}
 		}
 		if err != nil {
-			if !observed {
-				return tr, errors.Join(errTurnNotStarted, err)
-			}
-			return tr, fmt.Errorf("codex read turn: %w", err)
+			return collector.readFailure(err)
 		}
 	}
 }
 
-func handleAppEvent(msg map[string]any, tr *turnResult, text *strings.Builder, onEvent func(contracts.BackendEvent)) {
-	method, _ := msg["method"].(string)
-	params, _ := msg["params"].(map[string]any)
+func (c *turnCollector) consumeLine(ctx context.Context, line []byte, approvals *approver, respondHoldingSendLock func(map[string]any) error) (turnResult, bool, error) {
+	var msg map[string]any
+	if err := json.Unmarshal(line, &msg); err != nil {
+		slog.Debug("skipping a line from codex that is not a JSON object", "error", err)
+		return turnResult{}, false, nil
+	}
+	c.observed = true
+	if rpcErr, ok := msg["error"].(map[string]any); ok {
+		return c.reject(rpcErr), true, nil
+	}
+	if isServerRequest(msg) {
+		return turnResult{}, false, answerApproval(ctx, msg, msg["id"], approvals, respondHoldingSendLock)
+	}
+	c.handleAppEvent(msg)
+	if c.finished() {
+		return c.outcome(), true, nil
+	}
+	return turnResult{}, false, nil
+}
+
+func isServerRequest(msg map[string]any) bool {
+	_, hasID := msg["id"]
+	return hasID && msg[fieldMethod] != nil
+}
+
+func (c *turnCollector) reject(rpcErr map[string]any) turnResult {
+	c.result.IsError = true
+	c.result.ErrMsg = stringField(rpcErr, "message")
+	if c.result.ErrMsg == "" {
+		c.result.ErrMsg = "Codex rejected the turn"
+	}
+	c.emit(contracts.BackendEvent{Kind: eventResult, IsError: true})
+	return c.result
+}
+
+func (c *turnCollector) finished() bool {
+	return c.result.IsError || c.result.completed
+}
+
+func (c *turnCollector) outcome() turnResult {
+	if c.result.Text == "" {
+		c.result.Text = c.deltas.String()
+	}
+	return c.result
+}
+
+func (c *turnCollector) readFailure(err error) (turnResult, error) {
+	if !c.observed {
+		return c.result, errors.Join(errTurnNotStarted, err)
+	}
+	return c.result, fmt.Errorf("codex read turn: %w", err)
+}
+
+func (c *turnCollector) handleAppEvent(msg map[string]any) {
+	method := stringField(msg, fieldMethod)
+	params := mapField(msg, fieldParams)
 	switch method {
 	case "item/agentMessage/delta":
-		delta, _ := params["delta"].(string)
-		if delta != "" {
-			text.WriteString(delta)
-			if onEvent != nil {
-				onEvent(contracts.BackendEvent{Kind: "text", Detail: delta})
-			}
-		}
+		c.appendDelta(stringField(params, "delta"))
 	case "item/started", "item/completed":
-		item, _ := params["item"].(map[string]any)
-		typ, _ := item["type"].(string)
-		if typ == "agentMessage" || typ == "agent_message" {
-			if v, ok := item["text"].(string); ok && v != "" {
-				tr.Text = v
-			}
-		}
-		if typ == "commandExecution" || typ == "command_execution" {
-			cmd, _ := item["command"].(string)
-			if onEvent != nil && cmd != "" {
-				onEvent(contracts.BackendEvent{Kind: "tool", Tool: "command", Detail: cmd})
-			}
-		}
+		c.observeItem(mapField(params, "item"))
 	case "turn/completed":
-		turn, _ := params["turn"].(map[string]any)
-		status, _ := turn["status"].(string)
-		tr.IsError = status == "failed" || status == "error"
-		tr.ErrMsg, _ = turn["error"].(string)
-		if onEvent != nil {
-			onEvent(contracts.BackendEvent{Kind: "result", IsError: tr.IsError})
-		}
-		tr.completed = true
+		c.complete(mapField(params, "turn"))
 	case "turn/failed", "error":
-		tr.IsError = true
-		tr.ErrMsg, _ = params["message"].(string)
-		if tr.ErrMsg == "" {
-			tr.ErrMsg = method
+		c.fail(method, stringField(params, "message"))
+	}
+}
+
+func (c *turnCollector) appendDelta(delta string) {
+	if delta == "" {
+		return
+	}
+	_, _ = c.deltas.WriteString(delta)
+	c.emit(contracts.BackendEvent{Kind: eventText, Detail: delta})
+}
+
+func (c *turnCollector) observeItem(item map[string]any) {
+	switch stringField(item, "type") {
+	case "agentMessage", "agent_message":
+		if v, ok := item[fieldText].(string); ok && v != "" {
+			c.result.Text = v
 		}
-		if onEvent != nil {
-			onEvent(contracts.BackendEvent{Kind: "result", IsError: true})
+	case "commandExecution", "command_execution":
+		if cmd := stringField(item, "command"); cmd != "" {
+			c.emit(contracts.BackendEvent{Kind: "tool", Tool: "command", Detail: cmd})
 		}
-		tr.completed = true
+	}
+}
+
+func (c *turnCollector) complete(turn map[string]any) {
+	status := stringField(turn, "status")
+	c.result.IsError = status == "failed" || status == "error"
+	c.result.ErrMsg = stringField(turn, "error")
+	c.emit(contracts.BackendEvent{Kind: eventResult, IsError: c.result.IsError})
+	c.result.completed = true
+}
+
+func (c *turnCollector) fail(method, message string) {
+	c.result.IsError = true
+	c.result.ErrMsg = message
+	if c.result.ErrMsg == "" {
+		c.result.ErrMsg = method
+	}
+	c.emit(contracts.BackendEvent{Kind: eventResult, IsError: true})
+	c.result.completed = true
+}
+
+func (c *turnCollector) emit(event contracts.BackendEvent) {
+	if c.onEvent != nil {
+		c.onEvent(event)
 	}
 }
 
 func (s *appSession) Close() error {
-	return s.abort()
+	s.abort()
+	return s.closeErr
 }
 
-func (s *appSession) abort() error {
+func (s *appSession) abort() {
+	s.closeOnce.Do(func() { s.closeErr = s.release() })
+}
+
+func (s *appSession) release() error {
+	var errs []error
 	if s.stdin != nil {
-		_ = s.stdin.Close()
+		errs = append(errs, s.stdin.Close())
 	}
 	if s.outClose != nil {
-		_ = s.outClose.Close()
+		errs = append(errs, s.outClose.Close())
 	}
 	if s.cmd != nil && s.cmd.Process != nil {
-		_ = s.cmd.Process.Kill()
-		_ = s.cmd.Wait()
+		errs = append(errs, s.stopProcess())
 	}
-	return nil
+	return errors.Join(errs...)
+}
+
+func (s *appSession) stopProcess() error {
+	killErr := s.cmd.Process.Kill()
+	waitErr := s.cmd.Wait()
+	if _, exited := errors.AsType[*exec.ExitError](waitErr); exited && killErr == nil {
+		waitErr = nil
+	}
+	if errors.Is(killErr, os.ErrProcessDone) {
+		killErr = nil
+	}
+	return errors.Join(killErr, waitErr)
 }
 
 var memoryFence = regexp.MustCompile(`(?i)<\s*/?\s*memory\s*>`)
@@ -477,21 +555,17 @@ func withAttachments(text string, paths []string) string {
 	if len(paths) == 0 {
 		return text
 	}
-	var b strings.Builder
-	b.WriteString(text)
-	if text != "" {
-		b.WriteString("\n\n")
-	}
+	lines := make([]string, len(paths))
 	for i, p := range paths {
-		if i > 0 {
-			b.WriteByte('\n')
-		}
-		b.WriteString("[Image jointe : ")
-		b.WriteString(p)
-		b.WriteByte(']')
+		lines[i] = "[Image jointe : " + p + "]"
 	}
-	return b.String()
+	attachments := strings.Join(lines, "\n")
+	if text == "" {
+		return attachments
+	}
+	return text + "\n\n" + attachments
 }
+
 func withContext(ctx, text string) string {
 	if ctx == "" {
 		return text

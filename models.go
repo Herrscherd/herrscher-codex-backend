@@ -1,29 +1,31 @@
 package codex
 
-import "github.com/Herrscherd/herrscher-contracts"
+import contracts "github.com/Herrscherd/herrscher-contracts"
 
-// efforts is the effort axis of the GPT-5.6 models. Earlier models have no
-// separate effort axis and declare an empty list.
-var efforts = []string{"low", "medium", "high", "xhigh", "max", "ultra"}
+const (
+	modelGPT56Sol   = "gpt-5.6-sol"
+	modelGPT56Terra = "gpt-5.6-terra"
+	modelGPT56Luna  = "gpt-5.6-luna"
+	modelGPT55      = "gpt-5.5"
+	modelO4Mini     = "o4-mini"
+)
 
-// Models is the catalog of the OpenAI runtime. IDs and labels are drawn from
-// MODEL_CATALOG.codex in the app, which becomes obsolete once this source
-// takes over. Prices are absent (0 = unknown): they already were on the app
-// side.
-var Models = []contracts.ModelSpec{
-	{ID: "gpt-5.6-sol", Label: "GPT-5.6 Sol", Arg: "gpt-5.6-sol", Efforts: efforts, Route: contracts.RouteNative},
-	{ID: "gpt-5.6-terra", Label: "GPT-5.6 Terra", Arg: "gpt-5.6-terra", Efforts: efforts, Route: contracts.RouteNative},
-	{ID: "gpt-5.6-luna", Label: "GPT-5.6 Luna", Arg: "gpt-5.6-luna", Efforts: []string{"low", "medium", "high", "xhigh", "max"}, Route: contracts.RouteNative},
-	{ID: "gpt-5-codex", Label: "GPT-5 Codex", Arg: "gpt-5-codex", Route: contracts.RouteNative},
-	{ID: "gpt-5.5", Label: "GPT-5.5", Arg: "gpt-5.5", Route: contracts.RouteNative},
-	{ID: "o4-mini", Label: "o4-mini", Arg: "o4-mini", Route: contracts.RouteNative},
-
-	// --- Gateway route -------------------------------------------------
-	// Served by the gateway's OpenAI facade (see gatewayconfig.go).
-	{ID: "gw-gpt-5.6-sol", Label: "GPT-5.6 Sol", Arg: "gpt-5.6-sol", Efforts: efforts, Route: contracts.RouteGateway},
-	{ID: "gw-gpt-5.5", Label: "GPT-5.5", Arg: "gpt-5.5", Route: contracts.RouteGateway},
+func codexEfforts() []string {
+	return []string{"low", "medium", "high", "xhigh", "max", "ultra"}
 }
 
-// gpt-5 is deliberately absent: commit 3557344 proved it does not exist on
-// the cursor side, and the codex entry was never verified live. It comes back
-// once the codex CLI is confirmed to recognize it.
+// Models lists the models the host can route to this backend: the native ones on the
+// machine's own subscription, and the gateway ones routed through the gateway.
+func Models() []contracts.ModelSpec {
+	return []contracts.ModelSpec{
+		{ID: modelGPT56Sol, Label: "GPT-5.6 Sol", Arg: modelGPT56Sol, Efforts: codexEfforts(), Route: contracts.RouteNative},
+		{ID: modelGPT56Terra, Label: "GPT-5.6 Terra", Arg: modelGPT56Terra, Efforts: codexEfforts(), Route: contracts.RouteNative},
+		{ID: modelGPT56Luna, Label: "GPT-5.6 Luna", Arg: modelGPT56Luna, Efforts: []string{"low", "medium", "high", "xhigh", "max"}, Route: contracts.RouteNative},
+		{ID: "gpt-5-codex", Label: "GPT-5 Codex", Arg: "gpt-5-codex", Route: contracts.RouteNative},
+		{ID: modelGPT55, Label: "GPT-5.5", Arg: modelGPT55, Route: contracts.RouteNative},
+		{ID: modelO4Mini, Label: "o4-mini", Arg: modelO4Mini, Route: contracts.RouteNative},
+
+		{ID: "gw-gpt-5.6-sol", Label: "GPT-5.6 Sol", Arg: modelGPT56Sol, Efforts: codexEfforts(), Route: contracts.RouteGateway},
+		{ID: "gw-gpt-5.5", Label: "GPT-5.5", Arg: modelGPT55, Route: contracts.RouteGateway},
+	}
+}

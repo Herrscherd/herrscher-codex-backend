@@ -4,10 +4,13 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/Herrscherd/herrscher-contracts"
+	contracts "github.com/Herrscherd/herrscher-contracts"
 )
 
 func gatedEnv(session string) func(string) string {
@@ -64,13 +67,43 @@ func TestAllowAsksTheDaemonAndReadsItsVerdict(t *testing.T) {
 	}
 }
 
-// The failure contract is absolute: nothing internal ever denies. A daemon that
-// cannot be reached, or an answer that cannot be read, allows.
-func TestAllowFailsOpen(t *testing.T) {
+func TestAllowDeclinesWhenTheApproverFails(t *testing.T) {
+	dir := t.TempDir()
+	failing := filepath.Join(dir, "failing")
+	if err := os.WriteFile(failing, []byte("#!/bin/sh\nexit 3\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	passing := filepath.Join(dir, "passing")
+	if err := os.WriteFile(passing, []byte("#!/bin/sh\nprintf '{\"decision\":\"allow\"}'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name      string
+		bin       string
+		cancelled bool
+	}{
+		{name: "the binary is missing", bin: filepath.Join(dir, "absent")},
+		{name: "the binary fails", bin: failing},
+		{name: "the context is cancelled", bin: passing, cancelled: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			if tc.cancelled {
+				cancel()
+			} else {
+				defer cancel()
+			}
+			a := &approver{session: "api", bin: tc.bin, ask: runApprove}
+			if a.allow(ctx, "Bash", "ls") {
+				t.Fatal("a gated session allowed a tool call its approver did not answer")
+			}
+		})
+	}
+}
+
+func TestAllowDeclinesWhenTheAnswerIsUnusable(t *testing.T) {
 	cases := map[string]func(context.Context, string, []string) ([]byte, error){
-		"the daemon could not be reached": func(context.Context, string, []string) ([]byte, error) {
-			return nil, context.DeadlineExceeded
-		},
 		"the answer was not json": func(context.Context, string, []string) ([]byte, error) {
 			return []byte("what"), nil
 		},
@@ -81,8 +114,8 @@ func TestAllowFailsOpen(t *testing.T) {
 	for name, ask := range cases {
 		t.Run(name, func(t *testing.T) {
 			a := &approver{session: "api", bin: "/opt/herrscher", ask: ask}
-			if !a.allow(context.Background(), "Bash", "ls") {
-				t.Fatal("an internal failure denied a tool call")
+			if a.allow(context.Background(), "Bash", "ls") {
+				t.Fatal("an unusable answer allowed a tool call in a gated session")
 			}
 		})
 	}
@@ -94,59 +127,58 @@ func TestAllowFailsOpen(t *testing.T) {
 
 func TestApprovalSubjectCoversBothSpellings(t *testing.T) {
 	for _, m := range []string{"item/commandExecution/requestApproval", "execCommandApproval"} {
-		tool, subject, ok := approvalSubject(m, map[string]any{"command": "rm -rf /"})
-		if !ok || tool != "Bash" || subject != "rm -rf /" {
-			t.Fatalf("%s = (%q, %q, %v)", m, tool, subject, ok)
+		req, ok := approvalSubject(m, map[string]any{"command": "rm -rf /"})
+		if !ok || req.tool != "Bash" || req.subject != "rm -rf /" {
+			t.Fatalf("%s = (%+v, %v)", m, req, ok)
 		}
 	}
-	changes := map[string]any{"b.go": map[string]any{}, "a.go": map[string]any{}}
+	changes := map[string]any{"b.go": make(map[string]any), "a.go": make(map[string]any)}
 	for _, m := range []string{"item/fileChange/requestApproval", "applyPatchApproval"} {
-		tool, subject, ok := approvalSubject(m, map[string]any{"fileChanges": changes})
-		// Sorted, so two identical requests always produce the same subject.
-		if !ok || tool != "Write" || subject != "a.go b.go" {
-			t.Fatalf("%s = (%q, %q, %v)", m, tool, subject, ok)
+		req, ok := approvalSubject(m, map[string]any{"fileChanges": changes})
+		if !ok || req.tool != "Write" || req.subject != "a.go b.go" {
+			t.Fatalf("%s = (%+v, %v)", m, req, ok)
 		}
 	}
-	if _, _, ok := approvalSubject("item/somethingNew/requestApproval", nil); ok {
+	if _, ok := approvalSubject("item/somethingNew/requestApproval", nil); ok {
 		t.Fatal("an unknown method was claimed as known")
 	}
 }
 
-// decline and never cancel: cancel would abort the whole turn over one refused
-// command, instead of letting the agent pick another way.
 func TestApprovalResponseDeclinesRatherThanCancelling(t *testing.T) {
 	deny := approvalResponse(7, false)
 	if deny["id"] != 7 {
 		t.Fatalf("answered on id %v, want 7", deny["id"])
 	}
-	if got := deny["result"].(map[string]any)["decision"]; got != "decline" {
+	if got := mapField(deny, "result")["decision"]; got != "decline" {
 		t.Fatalf("decision = %v, want decline", got)
 	}
-	if got := approvalResponse(7, true)["result"].(map[string]any)["decision"]; got != "accept" {
+	if got := mapField(approvalResponse(7, true), "result")["decision"]; got != "accept" {
 		t.Fatalf("decision = %v, want accept", got)
 	}
 }
 
-// A request nobody recognises must still be answered: leaving a server request
-// without a response stalls the turn until its deadline.
 func TestAnswerApprovalAlwaysReplies(t *testing.T) {
 	var sent []map[string]any
 	respond := func(m map[string]any) error { sent = append(sent, m); return nil }
 	a := &approver{session: "api", ask: func(context.Context, string, []string) ([]byte, error) {
 		return []byte(`{"decision":"deny"}`), nil
 	}}
-	answerApproval(context.Background(), map[string]any{"method": "item/somethingNew/requestApproval"}, 1, a, respond)
-	answerApproval(context.Background(), map[string]any{
+	if err := answerApproval(context.Background(), map[string]any{"method": "item/somethingNew/requestApproval"}, 1, a, respond); err != nil {
+		t.Fatal(err)
+	}
+	if err := answerApproval(context.Background(), map[string]any{
 		"method": "item/commandExecution/requestApproval",
 		"params": map[string]any{"command": "rm -rf /"},
-	}, 2, a, respond)
+	}, 2, a, respond); err != nil {
+		t.Fatal(err)
+	}
 	if len(sent) != 2 {
 		t.Fatalf("sent %d replies, want 2", len(sent))
 	}
-	if got := sent[0]["result"].(map[string]any)["decision"]; got != "accept" {
-		t.Fatalf("unknown method answered %v, want accept", got)
+	if got := mapField(sent[0], "result")["decision"]; got != "decline" {
+		t.Fatalf("unknown method answered %v, want decline", got)
 	}
-	if got := sent[1]["result"].(map[string]any)["decision"]; got != "decline" {
+	if got := mapField(sent[1], "result")["decision"]; got != "decline" {
 		t.Fatalf("denied command answered %v, want decline", got)
 	}
 }
@@ -188,14 +220,10 @@ func TestDeclaresPerToolGating(t *testing.T) {
 	t.Fatal("codex backend did not self-register into contracts.Default")
 }
 
-// The dispatch inside the turn loop: a server request carries both an id and a
-// method, which is what tells it apart from a notification (method, no id) and
-// from a reply to one of our own requests (id, no method).
 func TestReadTurnAnswersAnApprovalRequestMidTurn(t *testing.T) {
-	lines := strings.Join([]string{
-		`{"id":9,"method":"item/commandExecution/requestApproval","params":{"command":"rm -rf /"}}`,
-		`{"method":"turn/completed","params":{"threadId":"t1"}}`,
-	}, "\n") + "\n"
+	lines := `{"id":9,"method":"item/commandExecution/requestApproval","params":{"command":"rm -rf /"}}
+{"method":"turn/completed","params":{"threadId":"t1"}}
+`
 	var sent []map[string]any
 	a := &approver{session: "api", ask: func(context.Context, string, []string) ([]byte, error) {
 		return []byte(`{"decision":"deny"}`), nil
@@ -210,8 +238,33 @@ func TestReadTurnAnswersAnApprovalRequestMidTurn(t *testing.T) {
 	if sent[0]["id"] != float64(9) {
 		t.Fatalf("answered on id %v, want the request's own 9", sent[0]["id"])
 	}
-	if got := sent[0]["result"].(map[string]any)["decision"]; got != "decline" {
+	if got := mapField(sent[0], "result")["decision"]; got != "decline" {
 		t.Fatalf("decision = %v, want decline", got)
+	}
+}
+
+func TestUnrecognisedRequestIsDeclinedInAGatedSession(t *testing.T) {
+	for _, method := range []string{"item/somethingNew/requestApproval", "auth/loginCallback"} {
+		var sent []map[string]any
+		a := &approver{session: "api"}
+		respond := func(m map[string]any) error { sent = append(sent, m); return nil }
+		if err := answerApproval(context.Background(), map[string]any{"method": method}, 1, a, respond); err != nil {
+			t.Fatal(err)
+		}
+		if got := mapField(sent[0], "result")["decision"]; got != "decline" {
+			t.Fatalf("%s answered %v, want decline", method, got)
+		}
+	}
+}
+
+func TestUnrecognisedRequestIsAcceptedWhenUngated(t *testing.T) {
+	var sent []map[string]any
+	respond := func(m map[string]any) error { sent = append(sent, m); return nil }
+	if err := answerApproval(context.Background(), map[string]any{"method": "item/somethingNew/requestApproval"}, 1, nil, respond); err != nil {
+		t.Fatal(err)
+	}
+	if got := mapField(sent[0], "result")["decision"]; got != "accept" {
+		t.Fatalf("ungated session answered %v, want accept", got)
 	}
 }
 
@@ -230,8 +283,12 @@ func TestAnswerApprovalWarnsOnceOnUnrecognisedApprovalRequest(t *testing.T) {
 			var warned strings.Builder
 			a := &approver{session: "api", warn: &warned}
 			respond := func(map[string]any) error { return nil }
-			answerApproval(context.Background(), map[string]any{"method": tc.method}, 1, a, respond)
-			answerApproval(context.Background(), map[string]any{"method": tc.method}, 2, a, respond)
+			if err := answerApproval(context.Background(), map[string]any{"method": tc.method}, 1, a, respond); err != nil {
+				t.Fatal(err)
+			}
+			if err := answerApproval(context.Background(), map[string]any{"method": tc.method}, 2, a, respond); err != nil {
+				t.Fatal(err)
+			}
 			got := strings.Contains(warned.String(), tc.method)
 			if got != tc.want {
 				t.Fatalf("warned=%v want=%v (%q)", got, tc.want, warned.String())
@@ -242,3 +299,22 @@ func TestAnswerApprovalWarnsOnceOnUnrecognisedApprovalRequest(t *testing.T) {
 		})
 	}
 }
+
+func TestAnswerApprovalReturnsRespondError(t *testing.T) {
+	sentinel := errors.New("respond failed")
+	a := &approver{session: "api", ask: func(context.Context, string, []string) ([]byte, error) {
+		return []byte(`{"decision":"allow"}`), nil
+	}}
+	respond := func(map[string]any) error { return sentinel }
+	if err := answerApproval(context.Background(), map[string]any{"method": "item/somethingNew/requestApproval"}, 1, a, respond); !errors.Is(err, sentinel) {
+		t.Fatalf("err=%v, want the respond error", err)
+	}
+}
+
+func TestWriteWarningLogsFailedWrite(_ *testing.T) {
+	writeWarning(failingWriter{}, "herrscher: a warning nobody reads\n")
+}
+
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("sink closed") }

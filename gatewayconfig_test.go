@@ -2,19 +2,18 @@ package codex
 
 import (
 	"context"
+	"errors"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/Herrscherd/herrscher-contracts"
+	contracts "github.com/Herrscherd/herrscher-contracts"
 )
 
 func TestGatewayConfigDeclaresResponsesWireAPI(t *testing.T) {
-	// codex 0.146.0 hard-rejects wire_api = "chat" at load time ("is no longer
-	// supported... set wire_api = \"responses\""), verified live against the
-	// installed CLI. A gateway route must therefore declare "responses", the
-	// value the CLI actually accepts.
 	got := gatewayConfigTOML("https://gw.example/openai")
 	if !strings.Contains(got, `wire_api = "responses"`) {
 		t.Fatalf("generated config lacks wire_api = \"responses\":\n%s", got)
@@ -28,9 +27,6 @@ func TestGatewayConfigDeclaresResponsesWireAPI(t *testing.T) {
 }
 
 func TestGatewayConfigNeverEmbedsTheToken(t *testing.T) {
-	// The token travels via env_key, never through the file: a CODEX_HOME left
-	// on disk containing the token would survive the process and leak into a
-	// bug report.
 	got := gatewayConfigTOML("https://gw.example/openai")
 	if !strings.Contains(got, `env_key = "NEUBLOX_TOKEN"`) {
 		t.Fatalf("config does not reference the token by env_key:\n%s", got)
@@ -70,13 +66,6 @@ func TestWriteGatewayHomeIsPrivate(t *testing.T) {
 	}
 }
 
-// TestWriteGatewayHomeIsUniquePerCall proves two gateway spawns never share a
-// CODEX_HOME. Before the fix, writeGatewayHome always resolved to the same
-// filepath.Join(dir, "codex-home") regardless of baseURL or call: two
-// concurrent sessions would race on one config.toml, and one session's
-// traffic could end up flowing through another session's base_url/token
-// pairing. Both directories must exist independently, each with its own
-// config content.
 func TestWriteGatewayHomeIsUniquePerCall(t *testing.T) {
 	dir := t.TempDir()
 	homeA, err := writeGatewayHome(dir, "https://gw-a.example/openai")
@@ -110,13 +99,6 @@ func TestWriteGatewayHomeIsUniquePerCall(t *testing.T) {
 	}
 }
 
-// TestWriteGatewayHomeDoesNotAdoptExistingDirectory proves a pre-existing
-// directory at the target path is never silently reused. Before the fix,
-// os.MkdirAll on an already-existing directory is a no-op that does not
-// re-apply the mode, so a pre-created (or attacker-controlled/symlinked)
-// "codex-home" with looser permissions would be adopted rather than
-// rejected. os.MkdirTemp always creates a fresh, unpredictable directory, so
-// pre-seeding the guessable legacy path must have no effect on the result.
 func TestWriteGatewayHomeDoesNotAdoptExistingDirectory(t *testing.T) {
 	dir := t.TempDir()
 	legacy := filepath.Join(dir, "codex-home")
@@ -151,9 +133,6 @@ func TestWriteGatewayHomeDoesNotAdoptExistingDirectory(t *testing.T) {
 	}
 }
 
-// TestGatewayRouteSetsCodexHome proves the oneshot spawn actually sees
-// CODEX_HOME pointing at a generated config once OPENAI_BASE_URL is present in
-// Config.Env — the wiring in NewBackend, not just the generator in isolation.
 func TestGatewayRouteSetsCodexHome(t *testing.T) {
 	script := "#!/bin/sh\nprintf 'CODEX_HOME=%s\\n' \"$CODEX_HOME\"\n"
 	path := filepath.Join(t.TempDir(), "codex")
@@ -193,11 +172,6 @@ func TestGatewayRouteSetsCodexHome(t *testing.T) {
 	}
 }
 
-// TestOneShotResponderCloseRemovesGatewayHome proves the one-shot route does
-// not leak a CODEX_HOME directory forever. Before the fix, nothing removed
-// the generated directory anywhere; the fixed legacy path masked the leak by
-// overwriting in place, but a per-spawn directory with no cleanup would
-// accumulate one leftover directory per session on a long-running host.
 func TestOneShotResponderCloseRemovesGatewayHome(t *testing.T) {
 	script := "#!/bin/sh\nprintf 'CODEX_HOME=%s\\n' \"$CODEX_HOME\"\n"
 	path := filepath.Join(t.TempDir(), "codex")
@@ -240,12 +214,6 @@ func TestOneShotResponderCloseRemovesGatewayHome(t *testing.T) {
 	}
 }
 
-// TestStreamResponderCloseRemovesGatewayHome is the streaming-route
-// counterpart of TestOneShotResponderCloseRemovesGatewayHome: it exercises
-// streamResponder.Close directly (with no app-server session ever started,
-// the common case for a gateway backend that is torn down before its first
-// turn) to prove the generated CODEX_HOME is removed regardless of whether an
-// appSession exists.
 func TestStreamResponderCloseRemovesGatewayHome(t *testing.T) {
 	dir := t.TempDir()
 	home, err := writeGatewayHome(dir, "https://gw.example/openai")
@@ -256,7 +224,7 @@ func TestStreamResponderCloseRemovesGatewayHome(t *testing.T) {
 		t.Fatalf("CODEX_HOME does not exist before Close: %v", err)
 	}
 
-	r := &streamResponder{gatewayHome: home}
+	r := &streamResponder{gatewayHomeRemovedOnClose: home}
 	if err := r.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
@@ -265,11 +233,6 @@ func TestStreamResponderCloseRemovesGatewayHome(t *testing.T) {
 	}
 }
 
-// TestNativeRouteLeavesCodexHomeUnset is the non-regression the brief calls
-// out by name: with no gateway environment injected, CODEX_HOME must not be
-// set at all, and the spawn must behave exactly as it does today. Deleting
-// the CODEX_HOME assignment in NewBackend must turn this test red on its own
-// — it does not merely share a fixture with the gateway-route test above.
 func TestNativeRouteLeavesCodexHomeUnset(t *testing.T) {
 	script := "#!/bin/sh\nif [ -z \"${CODEX_HOME+x}\" ]; then printf 'ABSENT'; else printf 'SET:%s' \"$CODEX_HOME\"; fi\n"
 	path := filepath.Join(t.TempDir(), "codex")
@@ -293,16 +256,6 @@ func TestNativeRouteLeavesCodexHomeUnset(t *testing.T) {
 	}
 }
 
-// TestFailingNewBackendLeavesNoGatewayHome pins the cleanup on NewBackend's
-// error paths. The generated CODEX_HOME is owned by the responder that gets
-// returned (which removes it on Close); when construction fails no responder
-// exists, so nothing would ever remove it. The host retries a misconfigured
-// gateway session, so before the fix each attempt left one /tmp/codex-home-*
-// behind for the daemon's lifetime.
-//
-// TMPDIR is redirected at a fresh directory because NewBackend materializes
-// the home under os.TempDir(); counting entries there is what makes the leak
-// observable at all.
 func TestFailingNewBackendLeavesNoGatewayHome(t *testing.T) {
 	gatewayEnv := map[string]string{
 		contracts.EnvOpenAIBaseURL: "https://gw.example/openai",
@@ -337,11 +290,6 @@ func TestFailingNewBackendLeavesNoGatewayHome(t *testing.T) {
 	}
 }
 
-// The host's contracts.GatewayCreds already makes a half-pair
-// unrepresentable, but this backend is a separate module driven through a
-// plain map[string]string: a base URL with no token must be refused here too,
-// rather than producing a CODEX_HOME whose env_key points at nothing and a
-// session that authenticates as nobody.
 func TestNewBackendRefusesGatewayBaseURLWithoutToken(t *testing.T) {
 	before := tempCodexHomes(t)
 	for _, tc := range []struct {
@@ -366,8 +314,6 @@ func TestNewBackendRefusesGatewayBaseURLWithoutToken(t *testing.T) {
 	}
 }
 
-// A complete pair still builds — the guard must refuse the half-pair, not the
-// gateway route itself.
 func TestNewBackendAcceptsGatewayPair(t *testing.T) {
 	b, err := NewBackend(context.Background(), Config{Kind: "oneshot", Cmd: "codex", Env: map[string]string{
 		contracts.EnvOpenAIBaseURL: "https://gw.example",
@@ -377,7 +323,7 @@ func TestNewBackendAcceptsGatewayPair(t *testing.T) {
 		t.Fatalf("NewBackend refused a complete gateway pair: %v", err)
 	}
 	if c, ok := b.(interface{ Close() error }); ok {
-		_ = c.Close()
+		closeChecked(t, c)
 	}
 }
 
@@ -388,4 +334,45 @@ func tempCodexHomes(t *testing.T) int {
 		t.Fatalf("glob: %v", err)
 	}
 	return len(m)
+}
+
+func homeBehindAFile(tb testing.TB) string {
+	tb.Helper()
+	blocker := filepath.Join(tb.TempDir(), "file")
+	if err := os.WriteFile(blocker, nil, 0o600); err != nil {
+		tb.Fatal(err)
+	}
+	return filepath.Join(blocker, "home")
+}
+
+func TestDiscardGatewayHomeJoinsARemovalFailure(t *testing.T) {
+	cause := errors.New("the backend refused to start")
+	err := discardGatewayHome(homeBehindAFile(t), cause)
+	if !errors.Is(err, cause) {
+		t.Fatalf("err = %v, want the original failure kept", err)
+	}
+	if _, ok := errors.AsType[*fs.PathError](err); !ok {
+		t.Fatalf("err = %v, want the removal failure joined to it", err)
+	}
+}
+
+func TestStreamResponderCloseReportsEverySessionAndCleanupFailure(t *testing.T) {
+	r := &streamResponder{
+		sess:                      newAppSession(nopWriteCloser{io.Discard}, &countingCloser{Reader: strings.NewReader("")}),
+		gatewayHomeRemovedOnClose: homeBehindAFile(t),
+	}
+	err := r.Close()
+	if !errors.Is(err, errCloseFailed) {
+		t.Fatalf("err = %v, want the session close failure", err)
+	}
+	if _, ok := errors.AsType[*fs.PathError](err); !ok {
+		t.Fatalf("err = %v, want the removal failure joined to it", err)
+	}
+}
+
+func TestDiscardGatewayHomeKeepsTheErrorWithoutAHome(t *testing.T) {
+	cause := errors.New("the backend refused to start")
+	if got := discardGatewayHome("", cause); !errors.Is(got, cause) {
+		t.Fatalf("got %v, want the original error", got)
+	}
 }
