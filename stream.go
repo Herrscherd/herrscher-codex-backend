@@ -51,6 +51,11 @@ type streamResponder struct {
 
 var errTurnNotStarted = errors.New("codex: app-server closed before any turn output")
 
+var (
+	errTurnFailed = errors.New("codex turn failed")
+	errNoThreadID = errors.New("codex app-server returned no thread id")
+)
+
 func (r *streamResponder) rememberToken(id string) {
 	r.tokenMu.Lock()
 	defer r.tokenMu.Unlock()
@@ -96,7 +101,7 @@ func (r *streamResponder) Respond(ctx context.Context, p contracts.Prompt, onEve
 		}
 	}
 	if tr.IsError {
-		return tr.Text, fmt.Errorf("codex turn failed: %s", tr.ErrMsg)
+		return tr.Text, fmt.Errorf("%w: %s", errTurnFailed, tr.ErrMsg)
 	}
 	return tr.Text, nil
 }
@@ -254,7 +259,7 @@ func (s *appSession) initialize(resume string) error {
 		s.threadID = resume
 	}
 	if s.threadID == "" {
-		return fmt.Errorf("codex app-server returned no thread id")
+		return errNoThreadID
 	}
 	return nil
 }

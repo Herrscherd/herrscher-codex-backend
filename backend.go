@@ -41,13 +41,21 @@ func resolveBackend(kind string, stream bool) string {
 	return "oneshot"
 }
 
+var errGatewayPairRefused = errors.New("refusing to spawn")
+
+var (
+	errOneShotNoCmd = errors.New("oneshot backend requires a non-empty Cmd")
+	errEmptyCommand = errors.New("empty Codex command")
+	errUnknownKind  = errors.New("unknown backend kind")
+)
+
 func checkGatewayPair(env map[string]string) error {
 	if env[contracts.EnvOpenAIBaseURL] == "" {
 		return nil
 	}
 	if strings.TrimSpace(env[contracts.EnvNeubloxToken]) == "" {
-		return fmt.Errorf("refusing to spawn: %s is set without %s; the session would run on the machine's own subscription while being routed through the gateway",
-			contracts.EnvOpenAIBaseURL, contracts.EnvNeubloxToken)
+		return fmt.Errorf("%w: %s is set without %s; the session would run on the machine's own subscription while being routed through the gateway",
+			errGatewayPairRefused, contracts.EnvOpenAIBaseURL, contracts.EnvNeubloxToken)
 	}
 	return nil
 }
@@ -84,7 +92,7 @@ func NewBackend(ctx context.Context, c Config) (contracts.Backend, error) {
 		warnOneShotUngated(ap, os.Stderr)
 		cmd, model, effort := oneShotCommand(c.Cmd, c.Model, c.Effort)
 		if cmd == "" {
-			return fail(fmt.Errorf("oneshot backend requires a non-empty Cmd"))
+			return fail(errOneShotNoCmd)
 		}
 		return &oneShotResponder{
 			run: func(ctx context.Context, p contracts.Prompt) (string, error) {
@@ -107,7 +115,7 @@ func NewBackend(ctx context.Context, c Config) (contracts.Backend, error) {
 		}
 		return &streamResponder{ctx: ctx, base: streamBase(base), model: c.Model, effort: c.Effort, dir: c.Dir, verbose: c.Verbose, resumeID: c.ResumeID, env: c.Env, gatewayHome: gatewayHome, ap: ap}, nil
 	default:
-		return fail(fmt.Errorf("unknown backend kind %q", kind))
+		return fail(fmt.Errorf("%w %q", errUnknownKind, kind))
 	}
 }
 
@@ -180,7 +188,7 @@ func (b *boundedBuffer) String() string {
 func runCmd(ctx context.Context, cmdStr, model, effort, dir string, verbose bool, env map[string]string, p contracts.Prompt) (string, error) {
 	fields := strings.Fields(cmdStr)
 	if len(fields) == 0 {
-		return "", fmt.Errorf("empty Codex command")
+		return "", errEmptyCommand
 	}
 	content := withContext(p.Context, withAttachments(p.Content, p.Attachments))
 	args := execArgs(fields, model, effort)
