@@ -50,13 +50,31 @@ func TestParseExecOutputUsesCodexAgentMessageType(t *testing.T) {
 	}
 }
 
-func TestExecPromptUsesStdinForMultilineContent(t *testing.T) {
-	content := "<memory>\nprevious turns\n</memory>\n\ncurrent request"
-	arg, stdin := execPrompt(content)
-	if arg != "-" {
-		t.Fatalf("prompt argument=%q want=-", arg)
+func TestRunCmdSendsThePromptOnStdin(t *testing.T) {
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "codex")
+	argFile := filepath.Join(dir, "arg")
+	stdinFile := filepath.Join(dir, "stdin")
+	script := "#!/bin/sh\nfor last; do :; done\nprintf '%s' \"$last\" > " + argFile + "\ncat > " + stdinFile + "\n"
+	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
 	}
-	if stdin != content {
+	content := "<memory>\nprevious turns\n</memory>\n\ncurrent request"
+	if _, err := runCmd(context.Background(), fake, "", "", "", false, nil, contracts.Prompt{Content: content}); err != nil {
+		t.Fatal(err)
+	}
+	arg, err := os.ReadFile(argFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(arg) != stdinPromptArg {
+		t.Fatalf("prompt argument=%q want=%q", arg, stdinPromptArg)
+	}
+	stdin, err := os.ReadFile(stdinFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(stdin) != content {
 		t.Fatalf("stdin=%q want=%q", stdin, content)
 	}
 }

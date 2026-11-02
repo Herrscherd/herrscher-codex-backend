@@ -57,11 +57,14 @@ func (a *approver) allow(ctx context.Context, tool, subject string) bool {
 	return verdict.Decision == "allow"
 }
 
-func approvalSubject(method string, params map[string]any) (string, string, bool) {
+type approvalRequest struct {
+	tool, subject string
+}
+
+func approvalSubject(method string, params map[string]any) (approvalRequest, bool) {
 	switch method {
 	case "item/commandExecution/requestApproval", "execCommandApproval":
-		cmd := stringField(params, "command")
-		return "Bash", cmd, true
+		return approvalRequest{tool: "Bash", subject: stringField(params, "command")}, true
 	case "item/fileChange/requestApproval", "applyPatchApproval":
 		changes := mapField(params, "fileChanges")
 		paths := make([]string, 0, len(changes))
@@ -69,9 +72,9 @@ func approvalSubject(method string, params map[string]any) (string, string, bool
 			paths = append(paths, p)
 		}
 		sort.Strings(paths)
-		return "Write", strings.Join(paths, " "), true
+		return approvalRequest{tool: "Write", subject: strings.Join(paths, " ")}, true
 	}
-	return "", "", false
+	return approvalRequest{}, false
 }
 
 func approvalResponse(id any, allow bool) map[string]any {
@@ -92,12 +95,12 @@ func approvalPolicy(gated bool) string {
 func answerApproval(ctx context.Context, msg map[string]any, id any, ap *approver, respond func(map[string]any) error) error {
 	method := stringField(msg, fieldMethod)
 	params := mapField(msg, "params")
-	tool, subject, known := approvalSubject(method, params)
+	request, known := approvalSubject(method, params)
 	if !known {
 		ap.warnUnrecognisedApproval(method)
 		return respond(approvalResponse(id, true))
 	}
-	return respond(approvalResponse(id, ap.allow(ctx, tool, subject)))
+	return respond(approvalResponse(id, ap.allow(ctx, request.tool, request.subject)))
 }
 
 func looksLikeApprovalRequest(method string) bool {

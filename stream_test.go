@@ -75,19 +75,15 @@ func TestStreamCommandOverridesGlobalModelAndEffort(t *testing.T) {
 }
 
 func TestOneShotCommandExtractsTurnConfiguration(t *testing.T) {
-	base, model, effort := oneShotCommand(
-		"codex --model gpt-5.6-terra --effort medium",
-		"",
-		"",
-	)
-	if base != "codex" {
-		t.Fatalf("base=%q want=codex", base)
+	spec := commandOverrides("codex --model gpt-5.6-terra --effort medium", "", "")
+	if strings.Join(spec.argv, " ") != "codex" {
+		t.Fatalf("argv=%v want=[codex]", spec.argv)
 	}
-	if model != "gpt-5.6-terra" {
-		t.Fatalf("model=%q", model)
+	if spec.model != "gpt-5.6-terra" {
+		t.Fatalf("model=%q", spec.model)
 	}
-	if effort != "medium" {
-		t.Fatalf("effort=%q", effort)
+	if spec.effort != "medium" {
+		t.Fatalf("effort=%q", spec.effort)
 	}
 }
 

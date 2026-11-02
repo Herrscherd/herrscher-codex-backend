@@ -93,19 +93,19 @@ func TestAllowFailsOpen(t *testing.T) {
 
 func TestApprovalSubjectCoversBothSpellings(t *testing.T) {
 	for _, m := range []string{"item/commandExecution/requestApproval", "execCommandApproval"} {
-		tool, subject, ok := approvalSubject(m, map[string]any{"command": "rm -rf /"})
-		if !ok || tool != "Bash" || subject != "rm -rf /" {
-			t.Fatalf("%s = (%q, %q, %v)", m, tool, subject, ok)
+		req, ok := approvalSubject(m, map[string]any{"command": "rm -rf /"})
+		if !ok || req.tool != "Bash" || req.subject != "rm -rf /" {
+			t.Fatalf("%s = (%+v, %v)", m, req, ok)
 		}
 	}
 	changes := map[string]any{"b.go": map[string]any{}, "a.go": map[string]any{}}
 	for _, m := range []string{"item/fileChange/requestApproval", "applyPatchApproval"} {
-		tool, subject, ok := approvalSubject(m, map[string]any{"fileChanges": changes})
-		if !ok || tool != "Write" || subject != "a.go b.go" {
-			t.Fatalf("%s = (%q, %q, %v)", m, tool, subject, ok)
+		req, ok := approvalSubject(m, map[string]any{"fileChanges": changes})
+		if !ok || req.tool != "Write" || req.subject != "a.go b.go" {
+			t.Fatalf("%s = (%+v, %v)", m, req, ok)
 		}
 	}
-	if _, _, ok := approvalSubject("item/somethingNew/requestApproval", nil); ok {
+	if _, ok := approvalSubject("item/somethingNew/requestApproval", nil); ok {
 		t.Fatal("an unknown method was claimed as known")
 	}
 }
@@ -187,10 +187,9 @@ func TestDeclaresPerToolGating(t *testing.T) {
 }
 
 func TestReadTurnAnswersAnApprovalRequestMidTurn(t *testing.T) {
-	lines := strings.Join([]string{
-		`{"id":9,"method":"item/commandExecution/requestApproval","params":{"command":"rm -rf /"}}`,
-		`{"method":"turn/completed","params":{"threadId":"t1"}}`,
-	}, "\n") + "\n"
+	lines := `{"id":9,"method":"item/commandExecution/requestApproval","params":{"command":"rm -rf /"}}
+{"method":"turn/completed","params":{"threadId":"t1"}}
+`
 	var sent []map[string]any
 	a := &approver{session: "api", ask: func(context.Context, string, []string) ([]byte, error) {
 		return []byte(`{"decision":"deny"}`), nil

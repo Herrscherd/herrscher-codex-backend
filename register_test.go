@@ -10,9 +10,10 @@ import (
 
 func backendPlugin(t *testing.T) contracts.Plugin {
 	t.Helper()
-	for _, p := range contracts.Default.Backends() {
-		if p.Manifest.Kind == "codex" {
-			return p
+	backends := contracts.Default.Backends()
+	for i := range backends {
+		if backends[i].Manifest.Kind == "codex" {
+			return backends[i]
 		}
 	}
 	t.Fatal("codex backend did not self-register")

@@ -90,22 +90,23 @@ func NewBackend(ctx context.Context, c Config) (contracts.Backend, error) {
 	switch kind {
 	case kindOneShot:
 		warnOneShotUngated(ap, os.Stderr)
-		cmd, model, effort := oneShotCommand(c.Cmd, c.Model, c.Effort)
+		spec := commandOverrides(c.Cmd, c.Model, c.Effort)
+		cmd := strings.Join(spec.argv, " ")
 		if cmd == "" {
 			return fail(errOneShotNoCmd)
 		}
 		return &oneShotResponder{
 			run: func(ctx context.Context, p contracts.Prompt) (string, error) {
-				return runCmd(ctx, cmd, model, effort, c.Dir, c.Verbose, c.Env, p)
+				return runCmd(ctx, cmd, spec.model, spec.effort, c.Dir, c.Verbose, c.Env, p)
 			},
 			gatewayHome: gatewayHome,
 		}, nil
 	case kindStream:
-		base, model, effort := commandOverrides(c.Cmd, c.Model, c.Effort)
-		c.Model, c.Effort = model, effort
+		spec := commandOverrides(c.Cmd, c.Model, c.Effort)
+		c.Model, c.Effort = spec.model, spec.effort
 		if runtime.GOOS == "windows" && os.Getenv("HERRSCHER_CODEX_ONESHOT_WINDOWS") == "1" {
 			warnOneShotUngated(ap, os.Stderr)
-			cmd := strings.Join(streamBase(base), " ")
+			cmd := strings.Join(streamBase(spec.argv), " ")
 			return &oneShotResponder{
 				run: func(ctx context.Context, p contracts.Prompt) (string, error) {
 					return runCmd(ctx, cmd, c.Model, c.Effort, c.Dir, c.Verbose, c.Env, p)
@@ -113,7 +114,7 @@ func NewBackend(ctx context.Context, c Config) (contracts.Backend, error) {
 				gatewayHome: gatewayHome,
 			}, nil
 		}
-		responder := &streamResponder{base: streamBase(base), model: c.Model, effort: c.Effort, dir: c.Dir, verbose: c.Verbose, resumeID: c.ResumeID, env: c.Env, gatewayHome: gatewayHome, ap: ap}
+		responder := &streamResponder{base: streamBase(spec.argv), model: c.Model, effort: c.Effort, dir: c.Dir, verbose: c.Verbose, resumeID: c.ResumeID, env: c.Env, gatewayHome: gatewayHome, ap: ap}
 		responder.start = responder.launchedWithin(ctx)
 		return responder, nil
 	default:
@@ -121,46 +122,49 @@ func NewBackend(ctx context.Context, c Config) (contracts.Backend, error) {
 	}
 }
 
-func commandOverrides(cmd, model, effort string) ([]string, string, string) {
-	base, commandModel, commandEffort := streamCommand(strings.Fields(cmd))
-	if commandModel != "" {
-		model = commandModel
-	}
-	if commandEffort != "" {
-		effort = commandEffort
-	}
-	return base, model, effort
+type commandSpec struct {
+	argv   []string
+	model  string
+	effort string
 }
 
-func oneShotCommand(cmd, model, effort string) (string, string, string) {
-	base, model, effort := commandOverrides(cmd, model, effort)
-	return strings.Join(base, " "), model, effort
+func commandOverrides(cmd, model, effort string) commandSpec {
+	spec := streamCommand(strings.Fields(cmd))
+	if spec.model == "" {
+		spec.model = model
+	}
+	if spec.effort == "" {
+		spec.effort = effort
+	}
+	return spec
 }
 
-func streamCommand(fields []string) ([]string, string, string) {
-	var base []string
-	var model, effort string
+func streamCommand(fields []string) commandSpec {
+	var spec commandSpec
 	for i := 0; i < len(fields); i++ {
 		switch fields[i] {
 		case "--model", "-m":
 			if i+1 < len(fields) {
-				model = fields[i+1]
+				spec.model = fields[i+1]
 				i++
 				continue
 			}
 		case "--effort":
 			if i+1 < len(fields) {
-				effort = fields[i+1]
+				spec.effort = fields[i+1]
 				i++
 				continue
 			}
 		}
-		base = append(base, fields[i])
+		spec.argv = append(spec.argv, fields[i])
 	}
-	return base, model, effort
+	return spec
 }
 
-const stderrCaptureLimit = 8 << 10
+const (
+	stderrCaptureLimit = 8 << 10
+	stdinPromptArg     = "-"
+)
 
 type boundedBuffer struct {
 	limit   int
@@ -195,12 +199,10 @@ func runCmd(ctx context.Context, cmdStr, model, effort, dir string, verbose bool
 		return "", errEmptyCommand
 	}
 	content := withContext(p.Context, withAttachments(p.Content, p.Attachments))
-	args := execArgs(fields, model, effort)
-	promptArg, promptStdin := execPrompt(content)
-	args = append(args, promptArg)
+	args := append(execArgs(fields, model, effort), stdinPromptArg)
 	cmd := exec.CommandContext(ctx, fields[0], args...)
 	cmd.Dir = dir
-	cmd.Stdin = strings.NewReader(promptStdin)
+	cmd.Stdin = strings.NewReader(content)
 	cmd.Env = contracts.MergeEnv(append(os.Environ(),
 		"DCTL_MSG="+p.Content,
 		"DCTL_AUTHOR="+p.Author,
@@ -241,13 +243,9 @@ func execArgs(fields []string, model, effort string) []string {
 	return args
 }
 
-func execPrompt(content string) (string, string) {
-	return "-", content
-}
-
 func parseExecOutput(out string) string {
 	fallback := ""
-	for len(out) > 0 {
+	for out != "" {
 		idx := strings.LastIndexByte(out, '\n')
 		raw := out[idx+1:]
 		if idx < 0 {
