@@ -17,7 +17,7 @@ func TestAppSessionLiveTwoTurns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	defer closeChecked(t, s)
 	first, err := s.Send(ctx, "Reply with exactly one word: ONE", nil)
 	if err != nil {
 		t.Fatal(err)

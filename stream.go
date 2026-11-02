@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"regexp"
@@ -80,7 +81,9 @@ func (r *streamResponder) Respond(ctx context.Context, p contracts.Prompt, onEve
 			onEvent(contracts.BackendEvent{Kind: "reset"})
 		}
 		resume := r.sess.threadID
-		_ = r.sess.Close()
+		if err := r.sess.Close(); err != nil {
+			slog.Warn("previous app-server session did not close cleanly", "error", err)
+		}
 		s, startErr := startAppSession(r.ctx, ctx, r.base, r.model, r.effort, r.dir, r.verbose, resume, r.env, r.ap)
 		if startErr != nil {
 			return "", startErr
@@ -284,7 +287,9 @@ func startAppSession(procCtx, callCtx context.Context, base []string, model, eff
 	s.dir = dir
 	s.ap = ap
 	if err := s.initializeCtx(callCtx, resume); err != nil {
-		_ = s.Close()
+		if closeErr := s.Close(); closeErr != nil {
+			return nil, errors.Join(err, closeErr)
+		}
 		return nil, err
 	}
 	return s, nil
@@ -335,7 +340,9 @@ func (s *appSession) Send(ctx context.Context, text string, onEvent func(contrac
 	case done := <-result:
 		return done.turn, done.err
 	case <-ctx.Done():
-		_ = s.abort()
+		if err := s.abort(); err != nil {
+			return turnResult{}, errors.Join(ctx.Err(), err)
+		}
 		return turnResult{}, ctx.Err()
 	}
 }
@@ -362,7 +369,9 @@ func readTurn(ctx context.Context, r *bufio.Reader, onEvent func(contracts.Backe
 					return tr, nil
 				}
 				if id, ok := msg["id"]; ok && msg["method"] != nil {
-					answerApproval(ctx, msg, id, ap, respond)
+					if err := answerApproval(ctx, msg, id, ap, respond); err != nil {
+						return turnResult{}, err
+					}
 					continue
 				}
 				handleAppEvent(msg, &tr, &text, onEvent)
@@ -436,17 +445,29 @@ func (s *appSession) Close() error {
 }
 
 func (s *appSession) abort() error {
+	var errs []error
 	if s.stdin != nil {
-		_ = s.stdin.Close()
+		errs = append(errs, s.stdin.Close())
 	}
 	if s.outClose != nil {
-		_ = s.outClose.Close()
+		errs = append(errs, s.outClose.Close())
 	}
 	if s.cmd != nil && s.cmd.Process != nil {
-		_ = s.cmd.Process.Kill()
-		_ = s.cmd.Wait()
+		errs = append(errs, s.stopProcess())
 	}
-	return nil
+	return errors.Join(errs...)
+}
+
+func (s *appSession) stopProcess() error {
+	killErr := s.cmd.Process.Kill()
+	waitErr := s.cmd.Wait()
+	if _, exited := errors.AsType[*exec.ExitError](waitErr); exited && killErr == nil {
+		waitErr = nil
+	}
+	if errors.Is(killErr, os.ErrProcessDone) {
+		killErr = nil
+	}
+	return errors.Join(killErr, waitErr)
 }
 
 var memoryFence = regexp.MustCompile(`(?i)<\s*/?\s*memory\s*>`)

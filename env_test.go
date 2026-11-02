@@ -145,7 +145,7 @@ func TestStreamSpawnAppliesInjectedEnv(t *testing.T) {
 
 		sess, err := startAppSession(ctx, ctx, []string{"sh", "-c", script}, "", "", dir, false, "", map[string]string{probeVar: "injected-stream-value"}, nil)
 		if err == nil {
-			defer func() { _ = sess.Close() }()
+			defer closeChecked(t, sess)
 		}
 		got := waitForProbeFile(t, probeFile)
 		if got != "injected-stream-value" {
@@ -164,7 +164,7 @@ func TestStreamSpawnAppliesInjectedEnv(t *testing.T) {
 
 		sess, err := startAppSession(ctx, ctx, []string{"sh", "-c", script}, "", "", dir, false, "", nil, nil)
 		if err == nil {
-			defer func() { _ = sess.Close() }()
+			defer closeChecked(t, sess)
 		}
 		got := waitForProbeFile(t, probeFile)
 		if got != "ABSENT" {

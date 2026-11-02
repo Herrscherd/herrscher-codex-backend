@@ -3,6 +3,7 @@ package codex
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -72,7 +73,7 @@ func NewBackend(ctx context.Context, c Config) (contracts.Backend, error) {
 	}
 	fail := func(err error) (contracts.Backend, error) {
 		if gatewayHome != "" {
-			_ = os.RemoveAll(gatewayHome)
+			return nil, errors.Join(err, os.RemoveAll(gatewayHome))
 		}
 		return nil, err
 	}

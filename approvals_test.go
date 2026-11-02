@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -118,10 +119,10 @@ func TestApprovalResponseDeclinesRatherThanCancelling(t *testing.T) {
 	if deny["id"] != 7 {
 		t.Fatalf("answered on id %v, want 7", deny["id"])
 	}
-	if got := deny["result"].(map[string]any)["decision"]; got != "decline" {
+	if got := mapField(deny, "result")["decision"]; got != "decline" {
 		t.Fatalf("decision = %v, want decline", got)
 	}
-	if got := approvalResponse(7, true)["result"].(map[string]any)["decision"]; got != "accept" {
+	if got := mapField(approvalResponse(7, true), "result")["decision"]; got != "accept" {
 		t.Fatalf("decision = %v, want accept", got)
 	}
 }
@@ -134,18 +135,22 @@ func TestAnswerApprovalAlwaysReplies(t *testing.T) {
 	a := &approver{session: "api", ask: func(context.Context, string, []string) ([]byte, error) {
 		return []byte(`{"decision":"deny"}`), nil
 	}}
-	answerApproval(context.Background(), map[string]any{"method": "item/somethingNew/requestApproval"}, 1, a, respond)
-	answerApproval(context.Background(), map[string]any{
+	if err := answerApproval(context.Background(), map[string]any{"method": "item/somethingNew/requestApproval"}, 1, a, respond); err != nil {
+		t.Fatal(err)
+	}
+	if err := answerApproval(context.Background(), map[string]any{
 		"method": "item/commandExecution/requestApproval",
 		"params": map[string]any{"command": "rm -rf /"},
-	}, 2, a, respond)
+	}, 2, a, respond); err != nil {
+		t.Fatal(err)
+	}
 	if len(sent) != 2 {
 		t.Fatalf("sent %d replies, want 2", len(sent))
 	}
-	if got := sent[0]["result"].(map[string]any)["decision"]; got != "accept" {
+	if got := mapField(sent[0], "result")["decision"]; got != "accept" {
 		t.Fatalf("unknown method answered %v, want accept", got)
 	}
-	if got := sent[1]["result"].(map[string]any)["decision"]; got != "decline" {
+	if got := mapField(sent[1], "result")["decision"]; got != "decline" {
 		t.Fatalf("denied command answered %v, want decline", got)
 	}
 }
@@ -209,7 +214,7 @@ func TestReadTurnAnswersAnApprovalRequestMidTurn(t *testing.T) {
 	if sent[0]["id"] != float64(9) {
 		t.Fatalf("answered on id %v, want the request's own 9", sent[0]["id"])
 	}
-	if got := sent[0]["result"].(map[string]any)["decision"]; got != "decline" {
+	if got := mapField(sent[0], "result")["decision"]; got != "decline" {
 		t.Fatalf("decision = %v, want decline", got)
 	}
 }
@@ -229,8 +234,12 @@ func TestAnswerApprovalWarnsOnceOnUnrecognisedApprovalRequest(t *testing.T) {
 			var warned strings.Builder
 			a := &approver{session: "api", warn: &warned}
 			respond := func(map[string]any) error { return nil }
-			answerApproval(context.Background(), map[string]any{"method": tc.method}, 1, a, respond)
-			answerApproval(context.Background(), map[string]any{"method": tc.method}, 2, a, respond)
+			if err := answerApproval(context.Background(), map[string]any{"method": tc.method}, 1, a, respond); err != nil {
+				t.Fatal(err)
+			}
+			if err := answerApproval(context.Background(), map[string]any{"method": tc.method}, 2, a, respond); err != nil {
+				t.Fatal(err)
+			}
 			got := strings.Contains(warned.String(), tc.method)
 			if got != tc.want {
 				t.Fatalf("warned=%v want=%v (%q)", got, tc.want, warned.String())
@@ -241,3 +250,22 @@ func TestAnswerApprovalWarnsOnceOnUnrecognisedApprovalRequest(t *testing.T) {
 		})
 	}
 }
+
+func TestAnswerApprovalReturnsRespondError(t *testing.T) {
+	sentinel := errors.New("respond failed")
+	a := &approver{session: "api", ask: func(context.Context, string, []string) ([]byte, error) {
+		return []byte(`{"decision":"allow"}`), nil
+	}}
+	respond := func(map[string]any) error { return sentinel }
+	if err := answerApproval(context.Background(), map[string]any{"method": "item/somethingNew/requestApproval"}, 1, a, respond); !errors.Is(err, sentinel) {
+		t.Fatalf("err=%v, want the respond error", err)
+	}
+}
+
+func TestWriteWarningLogsFailedWrite(t *testing.T) {
+	writeWarning(failingWriter{}, "herrscher: a warning nobody reads\n")
+}
+
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("sink closed") }

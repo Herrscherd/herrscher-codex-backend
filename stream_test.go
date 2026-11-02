@@ -35,7 +35,10 @@ func TestNewBackendExtractsModelAndEffortFromStreamCommand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := backend.(*streamResponder)
+	got, ok := backend.(*streamResponder)
+	if !ok {
+		t.Fatalf("backend is %T, want *streamResponder", backend)
+	}
 	if strings.Join(got.base, " ") != "codex" {
 		t.Fatalf("base=%v want=[codex]", got.base)
 	}
@@ -57,7 +60,10 @@ func TestStreamCommandOverridesGlobalModelAndEffort(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := backend.(*streamResponder)
+	got, ok := backend.(*streamResponder)
+	if !ok {
+		t.Fatalf("backend is %T, want *streamResponder", backend)
+	}
 	if got.model != "gpt-5.6-terra" {
 		t.Fatalf("model=%q want=%q", got.model, "gpt-5.6-terra")
 	}
@@ -154,29 +160,25 @@ func TestRequestShapes(t *testing.T) {
 func TestAppSessionSend(t *testing.T) {
 	inR, inW := io.Pipe()
 	outR, outW := io.Pipe()
-	go func() {
-		defer outW.Close()
-		br := bufio.NewReader(inR)
-		if _, err := br.ReadBytes('\n'); err != nil {
-			return
-		}
-		io.WriteString(outW, `{"method":"item/agentMessage/delta","params":{"delta":"ok"}}`+"\n")
-		io.WriteString(outW, `{"method":"turn/completed","params":{"turn":{"status":"completed"}}}`+"\n")
-	}()
+	replies := make(chan error, 1)
+	go func() { replies <- replyOnce(inR, outW) }()
 	s := newAppSession(inW, outR)
 	s.threadID = "thread-1"
 	tr, err := s.Send(context.Background(), "hi", nil)
 	if err != nil || tr.Text != "ok" {
 		t.Fatalf("turn=%+v err=%v", tr, err)
 	}
+	if err := <-replies; err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestAppSessionSendHonorsCanceledContext(t *testing.T) {
 	inR, inW := io.Pipe()
 	outR, outW := io.Pipe()
-	defer inR.Close()
-	defer outR.Close()
-	defer outW.Close()
+	defer closeChecked(t, inR)
+	defer closeChecked(t, outR)
+	defer closeChecked(t, outW)
 	s := newAppSession(inW, outR)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -187,9 +189,13 @@ func TestAppSessionSendHonorsCanceledContext(t *testing.T) {
 
 func TestInitializeCtxAbortsOnCancel(t *testing.T) {
 	inR, inW := io.Pipe()
-	go func() { _, _ = io.Copy(io.Discard, inR) }()
+	drained := make(chan error, 1)
+	go func() {
+		_, err := io.Copy(io.Discard, inR)
+		drained <- err
+	}()
 	stdoutR, stdoutW := io.Pipe()
-	defer stdoutW.Close()
+	defer closeChecked(t, stdoutW)
 	s := newAppSession(inW, stdoutR)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -229,5 +235,20 @@ func TestReadTurnDistinguishesAStartedTurnFromASilentServer(t *testing.T) {
 				t.Fatalf("underlying error lost: %v", err)
 			}
 		})
+	}
+}
+
+func replyOnce(in io.Reader, out *io.PipeWriter) error {
+	if _, err := bufio.NewReader(in).ReadBytes('\n'); err != nil {
+		return out.Close()
+	}
+	_, err := io.WriteString(out, `{"method":"item/agentMessage/delta","params":{"delta":"ok"}}`+"\n"+`{"method":"turn/completed","params":{"turn":{"status":"completed"}}}`+"\n")
+	return errors.Join(err, out.Close())
+}
+
+func closeChecked(t *testing.T, closer io.Closer) {
+	t.Helper()
+	if err := closer.Close(); err != nil {
+		t.Errorf("close: %v", err)
 	}
 }

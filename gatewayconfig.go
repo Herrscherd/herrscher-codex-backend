@@ -1,6 +1,7 @@
 package codex
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -27,8 +28,7 @@ func writeGatewayHome(dir, baseURL string) (string, error) {
 	}
 	path := filepath.Join(home, "config.toml")
 	if err := os.WriteFile(path, []byte(gatewayConfigTOML(baseURL)), 0o600); err != nil {
-		_ = os.RemoveAll(home)
-		return "", fmt.Errorf("codex gateway config: %w", err)
+		return "", errors.Join(fmt.Errorf("codex gateway config: %w", err), os.RemoveAll(home))
 	}
 	return home, nil
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"sort"
@@ -88,16 +89,15 @@ func approvalPolicy(gated bool) string {
 	return "never"
 }
 
-func answerApproval(ctx context.Context, msg map[string]any, id any, ap *approver, respond func(map[string]any) error) {
+func answerApproval(ctx context.Context, msg map[string]any, id any, ap *approver, respond func(map[string]any) error) error {
 	method := stringField(msg, "method")
 	params := mapField(msg, "params")
 	tool, subject, known := approvalSubject(method, params)
 	if !known {
 		ap.warnUnrecognisedApproval(method)
-		_ = respond(approvalResponse(id, true))
-		return
+		return respond(approvalResponse(id, true))
 	}
-	_ = respond(approvalResponse(id, ap.allow(ctx, tool, subject)))
+	return respond(approvalResponse(id, ap.allow(ctx, tool, subject)))
 }
 
 func looksLikeApprovalRequest(method string) bool {
@@ -117,7 +117,7 @@ func (a *approver) warnUnrecognisedApproval(method string) {
 		a.warned = map[string]bool{}
 	}
 	a.warned[method] = true
-	fmt.Fprintf(a.warn, "herrscher: unrecognised approval request %q auto-accepted in session %q\n", method, a.session)
+	writeWarning(a.warn, fmt.Sprintf("herrscher: unrecognised approval request %q auto-accepted in session %q\n", method, a.session))
 }
 
 func approverFromEnv() *approver { return newApprover(os.Getenv) }
@@ -126,5 +126,11 @@ func warnOneShotUngated(ap *approver, w io.Writer) {
 	if ap == nil {
 		return
 	}
-	fmt.Fprintf(w, "herrscher: codex exec has no approval channel, so session %q runs ungated on this path\n", ap.session)
+	writeWarning(w, fmt.Sprintf("herrscher: codex exec has no approval channel, so session %q runs ungated on this path\n", ap.session))
+}
+
+func writeWarning(w io.Writer, message string) {
+	if _, err := io.WriteString(w, message); err != nil {
+		slog.Warn("approval warning not written", "error", err)
+	}
 }

@@ -370,7 +370,7 @@ func TestNewBackendAcceptsGatewayPair(t *testing.T) {
 		t.Fatalf("NewBackend refused a complete gateway pair: %v", err)
 	}
 	if c, ok := b.(interface{ Close() error }); ok {
-		_ = c.Close()
+		closeChecked(t, c)
 	}
 }
 
