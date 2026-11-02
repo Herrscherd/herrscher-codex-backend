@@ -102,7 +102,6 @@ func TestApprovalSubjectCoversBothSpellings(t *testing.T) {
 	changes := map[string]any{"b.go": map[string]any{}, "a.go": map[string]any{}}
 	for _, m := range []string{"item/fileChange/requestApproval", "applyPatchApproval"} {
 		tool, subject, ok := approvalSubject(m, map[string]any{"fileChanges": changes})
-		// Sorted, so two identical requests always produce the same subject.
 		if !ok || tool != "Write" || subject != "a.go b.go" {
 			t.Fatalf("%s = (%q, %q, %v)", m, tool, subject, ok)
 		}

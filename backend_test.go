@@ -94,8 +94,6 @@ func mustBackend(t *testing.T, c Config) contracts.Backend {
 // diagnostic. cmd.Output() only populates ExitError.Stderr when Stderr is nil,
 // and we set it (for the verbose passthrough), so it must be captured by hand.
 func TestRunCmdErrorIncludesStderr(t *testing.T) {
-	// A stand-in for the codex binary: ignores its argv, complains on stderr and
-	// exits non-zero — exactly the shape that used to debug blind.
 	fake := filepath.Join(t.TempDir(), "codex")
 	script := "#!/bin/sh\necho 'codex: model not found' >&2\nexit 7\n"
 	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
@@ -115,8 +113,6 @@ func TestRunCmdErrorIncludesStderr(t *testing.T) {
 }
 
 func TestRunCmdErrorCarriesChildStderrText(t *testing.T) {
-	// Direct check of the capture wiring runCmd uses: stderr must survive
-	// cmd.Output(), which discards ExitError.Stderr once Stderr is non-nil.
 	buf := &boundedBuffer{limit: stderrCaptureLimit}
 	cmd := exec.CommandContext(context.Background(), "sh", "-c", "echo boom-sentinel >&2; exit 3")
 	cmd.Stderr = buf
@@ -134,8 +130,6 @@ func TestBoundedBufferTruncatesRunawayStderr(t *testing.T) {
 	if n != 4 || err != nil {
 		t.Fatalf("Write = %d, %v", n, err)
 	}
-	// Over-long writes must still report a full write so the child never sees a
-	// short write on its stderr pipe.
 	if n, err := b.Write([]byte("bbbbbbbbbb")); n != 10 || err != nil {
 		t.Fatalf("Write = %d, %v; want 10, nil", n, err)
 	}
@@ -149,8 +143,6 @@ func TestBoundedBufferTruncatesRunawayStderr(t *testing.T) {
 }
 
 func TestRunCmdVerboseStillPassesStderrThrough(t *testing.T) {
-	// Verbose keeps the os.Stderr passthrough *and* captures; assert the
-	// capturing half via a MultiWriter equivalent.
 	var mirror strings.Builder
 	buf := &boundedBuffer{limit: stderrCaptureLimit}
 	cmd := exec.CommandContext(context.Background(), "sh", "-c", "echo mirrored >&2; exit 1")

@@ -186,8 +186,6 @@ func TestAppSessionSendHonorsCanceledContext(t *testing.T) {
 }
 
 func TestInitializeCtxAbortsOnCancel(t *testing.T) {
-	// stdin drains so the initialize request write succeeds; stdout never
-	// answers, so the handshake would block forever without ctx binding.
 	inR, inW := io.Pipe()
 	go func() { _, _ = io.Copy(io.Discard, inR) }()
 	stdoutR, stdoutW := io.Pipe()

@@ -19,10 +19,6 @@ import (
 type oneShotResponder struct {
 	run func(context.Context, contracts.Prompt) (string, error)
 
-	// gatewayHome is the per-spawn CODEX_HOME directory created by
-	// writeGatewayHome for a gateway route ("" on the native route). Close
-	// removes it so a long-running host does not leak one directory per
-	// session.
 	gatewayHome string
 }
 
@@ -42,10 +38,10 @@ type streamResponder struct {
 	base               []string
 	model, effort, dir string
 	verbose            bool
-	resumeID           string            // thread id to resume on the FIRST start ("" = fresh)
-	env                map[string]string // injected into the child process at every (re)spawn
-	gatewayHome        string            // per-spawn CODEX_HOME to remove on Close ("" on the native route)
-	ap                 *approver         // answers codex's approval requests; nil = this session runs ungated
+	resumeID           string
+	env                map[string]string
+	gatewayHome        string
+	ap                 *approver
 	mu                 sync.Mutex
 	sess               *appSession
 	tokenMu            sync.Mutex
@@ -102,10 +98,6 @@ func (r *streamResponder) Respond(ctx context.Context, p contracts.Prompt, onEve
 	return tr.Text, nil
 }
 
-// ResumeToken returns the backend's current codex thread id — the stable id for
-// this conversation, for the host to persist and pass back via --resume. Before
-// the first turn it returns the id supplied at construction. Implements
-// contracts.ResumeAware.
 func (r *streamResponder) ResumeToken() string {
 	r.tokenMu.Lock()
 	defer r.tokenMu.Unlock()
@@ -140,10 +132,6 @@ func streamBase(fields []string) []string {
 func appServerArgv(base []string, gated bool) []string {
 	argv := append([]string{}, base...)
 	argv = append(argv,
-		// See execArgs: headless runs non-interactively, sandbox_mode bounds the
-		// blast radius to the worktree, neublox MCP is the one trusted surface.
-		// Under a policy the agent asks instead of deciding alone, which is what
-		// makes the requests this session answers ever arrive.
 		"-c", `approval_policy="`+approvalPolicy(gated)+`"`,
 		"-c", `sandbox_mode="workspace-write"`,
 		"-c", `mcp_servers.neublox.default_tools_approval_mode="approve"`,
@@ -168,10 +156,7 @@ type appSession struct {
 	threadID           string
 	model, effort, dir string
 	nextID             int
-	// ap answers codex's approval requests. nil = this session was spawned with
-	// no policy in force, and codex was started with approval_policy="never", so
-	// no request ever arrives to answer.
-	ap *approver
+	ap                 *approver
 }
 
 func newAppSession(stdin io.WriteCloser, out io.Reader) *appSession {
@@ -271,12 +256,6 @@ func (s *appSession) initialize(resume string) error {
 	return nil
 }
 
-// startAppSession spawns the app-server bound to procCtx (its lifetime spans
-// turns) and runs the initialize handshake bound to callCtx (the current turn).
-// A cancelled turn aborts a stalled handshake instead of blocking forever on a
-// silent app-server. env is merged over the daemon's inherited environment
-// (see contracts.MergeEnv): with no injection, the child process environment
-// is unchanged.
 func startAppSession(procCtx, callCtx context.Context, base []string, model, effort, dir string, verbose bool, resume string, env map[string]string, ap *approver) (*appSession, error) {
 	argv := appServerArgv(base, ap != nil)
 	cmd := exec.CommandContext(procCtx, argv[0], argv[1:]...)
@@ -311,9 +290,6 @@ func startAppSession(procCtx, callCtx context.Context, base []string, model, eff
 	return s, nil
 }
 
-// initializeCtx runs the blocking initialize handshake in a goroutine and
-// abandons it when callCtx is cancelled. The caller Closes the session on
-// error, which kills the process and unblocks the goroutine's pending read.
 func (s *appSession) initializeCtx(ctx context.Context, resume string) error {
 	if ctx == nil {
 		return s.initialize(resume)
@@ -364,9 +340,6 @@ func (s *appSession) Send(ctx context.Context, text string, onEvent func(contrac
 	}
 }
 
-// respond writes one reply back to the app-server. It is s.write at the only
-// call site, which is safe despite running in readTurn's goroutine: Send holds
-// s.mu for the whole turn, so there is exactly one writer at a time.
 func readTurn(ctx context.Context, r *bufio.Reader, onEvent func(contracts.BackendEvent), ap *approver, respond func(map[string]any) error) (turnResult, error) {
 	var tr turnResult
 	var text strings.Builder

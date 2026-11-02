@@ -11,10 +11,6 @@ import (
 )
 
 func TestGatewayConfigDeclaresResponsesWireAPI(t *testing.T) {
-	// codex 0.146.0 hard-rejects wire_api = "chat" at load time ("is no longer
-	// supported... set wire_api = \"responses\""), verified live against the
-	// installed CLI. A gateway route must therefore declare "responses", the
-	// value the CLI actually accepts.
 	got := gatewayConfigTOML("https://gw.example/openai")
 	if !strings.Contains(got, `wire_api = "responses"`) {
 		t.Fatalf("generated config lacks wire_api = \"responses\":\n%s", got)
@@ -28,9 +24,6 @@ func TestGatewayConfigDeclaresResponsesWireAPI(t *testing.T) {
 }
 
 func TestGatewayConfigNeverEmbedsTheToken(t *testing.T) {
-	// The token travels via env_key, never through the file: a CODEX_HOME left
-	// on disk containing the token would survive the process and leak into a
-	// bug report.
 	got := gatewayConfigTOML("https://gw.example/openai")
 	if !strings.Contains(got, `env_key = "NEUBLOX_TOKEN"`) {
 		t.Fatalf("config does not reference the token by env_key:\n%s", got)
@@ -153,7 +146,7 @@ func TestWriteGatewayHomeDoesNotAdoptExistingDirectory(t *testing.T) {
 
 // TestGatewayRouteSetsCodexHome proves the oneshot spawn actually sees
 // CODEX_HOME pointing at a generated config once OPENAI_BASE_URL is present in
-// Config.Env — the wiring in NewBackend, not just the generator in isolation.
+// Config.Env: the wiring in NewBackend, not just the generator in isolation.
 func TestGatewayRouteSetsCodexHome(t *testing.T) {
 	script := "#!/bin/sh\nprintf 'CODEX_HOME=%s\\n' \"$CODEX_HOME\"\n"
 	path := filepath.Join(t.TempDir(), "codex")
@@ -268,8 +261,8 @@ func TestStreamResponderCloseRemovesGatewayHome(t *testing.T) {
 // TestNativeRouteLeavesCodexHomeUnset is the non-regression the brief calls
 // out by name: with no gateway environment injected, CODEX_HOME must not be
 // set at all, and the spawn must behave exactly as it does today. Deleting
-// the CODEX_HOME assignment in NewBackend must turn this test red on its own
-// — it does not merely share a fixture with the gateway-route test above.
+// the CODEX_HOME assignment in NewBackend must turn this test red on its own.
+// It does not merely share a fixture with the gateway-route test above.
 func TestNativeRouteLeavesCodexHomeUnset(t *testing.T) {
 	script := "#!/bin/sh\nif [ -z \"${CODEX_HOME+x}\" ]; then printf 'ABSENT'; else printf 'SET:%s' \"$CODEX_HOME\"; fi\n"
 	path := filepath.Join(t.TempDir(), "codex")
@@ -366,7 +359,7 @@ func TestNewBackendRefusesGatewayBaseURLWithoutToken(t *testing.T) {
 	}
 }
 
-// A complete pair still builds — the guard must refuse the half-pair, not the
+// A complete pair still builds: the guard must refuse the half-pair, not the
 // gateway route itself.
 func TestNewBackendAcceptsGatewayPair(t *testing.T) {
 	b, err := NewBackend(context.Background(), Config{Kind: "oneshot", Cmd: "codex", Env: map[string]string{
