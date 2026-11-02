@@ -388,10 +388,15 @@ func TestStopProcessIgnoresTheExitStatusOfTheChild(t *testing.T) {
 	}
 }
 
+const (
+	quietPeriod   = 100 * time.Millisecond
+	writeDeadline = 5 * time.Second
+)
+
 type turnProbe struct {
 	mu      sync.Mutex
 	calls   int
-	entered chan struct{}
+	writes  chan struct{}
 	release chan struct{}
 	forward io.Writer
 }
@@ -401,20 +406,14 @@ func (p *turnProbe) Write(data []byte) (int, error) {
 	p.calls++
 	first := p.calls == 1
 	p.mu.Unlock()
+	p.writes <- struct{}{}
 	if first {
-		p.entered <- struct{}{}
 		<-p.release
 	}
 	return p.forward.Write(data)
 }
 
 func (p *turnProbe) Close() error { return nil }
-
-func (p *turnProbe) count() int {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.calls
-}
 
 func serveTurns(in io.Reader, out *io.PipeWriter) error {
 	reader := bufio.NewReader(in)
@@ -430,7 +429,8 @@ func serveTurns(in io.Reader, out *io.PipeWriter) error {
 	}
 }
 
-func TestSendHoldsTheSessionForOneTurn(t *testing.T) {
+func servedPipe(t *testing.T) (*io.PipeWriter, *io.PipeReader) {
+	t.Helper()
 	reqR, reqW := io.Pipe()
 	outR, outW := io.Pipe()
 	served := make(chan error, 1)
@@ -441,7 +441,12 @@ func TestSendHoldsTheSessionForOneTurn(t *testing.T) {
 			t.Errorf("serve turns: %v", err)
 		}
 	})
-	probe := &turnProbe{entered: make(chan struct{}, 1), release: make(chan struct{}), forward: reqW}
+	return reqW, outR
+}
+
+func TestSendHoldsTheSessionForOneTurn(t *testing.T) {
+	reqW, outR := servedPipe(t)
+	probe := &turnProbe{writes: make(chan struct{}, 4), release: make(chan struct{}), forward: reqW}
 	s := newAppSession(probe, outR)
 	s.threadID = "thread-1"
 
@@ -450,24 +455,78 @@ func TestSendHoldsTheSessionForOneTurn(t *testing.T) {
 		_, err := s.Send(context.Background(), "one", nil)
 		first <- err
 	}()
-	<-probe.entered
+	<-probe.writes
 
 	second := make(chan error, 1)
 	go func() {
 		_, err := s.Send(context.Background(), "two", nil)
 		second <- err
 	}()
-	time.Sleep(100 * time.Millisecond)
-	writesWhileFirstInFlight := probe.count()
-	close(probe.release)
-
-	if writesWhileFirstInFlight != 1 {
-		t.Errorf("a second turn wrote %d requests while the first was in flight, want 1", writesWhileFirstInFlight)
+	select {
+	case <-probe.writes:
+		t.Error("a second turn was written while the first was in flight")
+	case <-time.After(quietPeriod):
 	}
+	close(probe.release)
+	select {
+	case <-probe.writes:
+	case <-time.After(writeDeadline):
+		t.Error("the second turn was never written")
+	}
+
 	if err := <-first; err != nil {
 		t.Errorf("first Send: %v", err)
 	}
 	if err := <-second; err != nil {
 		t.Errorf("second Send: %v", err)
+	}
+}
+
+func TestRespondOpensOneSessionForConcurrentTurns(t *testing.T) {
+	var opened atomic.Int32
+	entered := make(chan struct{}, 2)
+	release := make(chan struct{})
+	r := &streamResponder{}
+	r.start = func(context.Context, string) (*appSession, error) {
+		opened.Add(1)
+		entered <- struct{}{}
+		<-release
+		reqW, outR := servedPipe(t)
+		s := newAppSession(reqW, outR)
+		s.threadID = "thread-1"
+		return s, nil
+	}
+	prompt := contracts.Prompt{Content: "hi"}
+
+	first := make(chan error, 1)
+	go func() {
+		_, err := r.Respond(context.Background(), prompt, nil)
+		first <- err
+	}()
+	<-entered
+
+	second := make(chan error, 1)
+	go func() {
+		_, err := r.Respond(context.Background(), prompt, nil)
+		second <- err
+	}()
+	select {
+	case <-entered:
+		t.Error("a second Respond opened a session while the first was opening one")
+	case <-time.After(quietPeriod):
+	}
+	close(release)
+
+	if err := <-first; err != nil {
+		t.Errorf("first Respond: %v", err)
+	}
+	if err := <-second; err != nil {
+		t.Errorf("second Respond: %v", err)
+	}
+	if n := opened.Load(); n != 1 {
+		t.Errorf("sessions opened = %d, want 1", n)
+	}
+	if err := r.Close(); err != nil {
+		t.Errorf("Close: %v", err)
 	}
 }
