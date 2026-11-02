@@ -59,10 +59,10 @@ func (a *approver) allow(ctx context.Context, tool, subject string) bool {
 func approvalSubject(method string, params map[string]any) (tool, subject string, ok bool) {
 	switch method {
 	case "item/commandExecution/requestApproval", "execCommandApproval":
-		cmd, _ := params["command"].(string)
+		cmd := stringField(params, "command")
 		return "Bash", cmd, true
 	case "item/fileChange/requestApproval", "applyPatchApproval":
-		changes, _ := params["fileChanges"].(map[string]any)
+		changes := mapField(params, "fileChanges")
 		paths := make([]string, 0, len(changes))
 		for p := range changes {
 			paths = append(paths, p)
@@ -89,8 +89,8 @@ func approvalPolicy(gated bool) string {
 }
 
 func answerApproval(ctx context.Context, msg map[string]any, id any, ap *approver, respond func(map[string]any) error) {
-	method, _ := msg["method"].(string)
-	params, _ := msg["params"].(map[string]any)
+	method := stringField(msg, "method")
+	params := mapField(msg, "params")
 	tool, subject, known := approvalSubject(method, params)
 	if !known {
 		ap.warnUnrecognisedApproval(method)

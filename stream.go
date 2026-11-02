@@ -244,9 +244,9 @@ func (s *appSession) initialize(resume string) error {
 	if err != nil {
 		return err
 	}
-	result, _ := msg["result"].(map[string]any)
-	thread, _ := result["thread"].(map[string]any)
-	s.threadID, _ = thread["id"].(string)
+	result := mapField(msg, "result")
+	thread := mapField(result, "thread")
+	s.threadID = stringField(thread, "id")
 	if s.threadID == "" {
 		s.threadID = resume
 	}
@@ -352,7 +352,7 @@ func readTurn(ctx context.Context, r *bufio.Reader, onEvent func(contracts.Backe
 				observed = true
 				if rpcErr, ok := msg["error"].(map[string]any); ok {
 					tr.IsError = true
-					tr.ErrMsg, _ = rpcErr["message"].(string)
+					tr.ErrMsg = stringField(rpcErr, "message")
 					if tr.ErrMsg == "" {
 						tr.ErrMsg = "Codex rejected the turn"
 					}
@@ -384,11 +384,11 @@ func readTurn(ctx context.Context, r *bufio.Reader, onEvent func(contracts.Backe
 }
 
 func handleAppEvent(msg map[string]any, tr *turnResult, text *strings.Builder, onEvent func(contracts.BackendEvent)) {
-	method, _ := msg["method"].(string)
-	params, _ := msg["params"].(map[string]any)
+	method := stringField(msg, "method")
+	params := mapField(msg, "params")
 	switch method {
 	case "item/agentMessage/delta":
-		delta, _ := params["delta"].(string)
+		delta := stringField(params, "delta")
 		if delta != "" {
 			text.WriteString(delta)
 			if onEvent != nil {
@@ -396,31 +396,31 @@ func handleAppEvent(msg map[string]any, tr *turnResult, text *strings.Builder, o
 			}
 		}
 	case "item/started", "item/completed":
-		item, _ := params["item"].(map[string]any)
-		typ, _ := item["type"].(string)
+		item := mapField(params, "item")
+		typ := stringField(item, "type")
 		if typ == "agentMessage" || typ == "agent_message" {
 			if v, ok := item["text"].(string); ok && v != "" {
 				tr.Text = v
 			}
 		}
 		if typ == "commandExecution" || typ == "command_execution" {
-			cmd, _ := item["command"].(string)
+			cmd := stringField(item, "command")
 			if onEvent != nil && cmd != "" {
 				onEvent(contracts.BackendEvent{Kind: "tool", Tool: "command", Detail: cmd})
 			}
 		}
 	case "turn/completed":
-		turn, _ := params["turn"].(map[string]any)
-		status, _ := turn["status"].(string)
+		turn := mapField(params, "turn")
+		status := stringField(turn, "status")
 		tr.IsError = status == "failed" || status == "error"
-		tr.ErrMsg, _ = turn["error"].(string)
+		tr.ErrMsg = stringField(turn, "error")
 		if onEvent != nil {
 			onEvent(contracts.BackendEvent{Kind: "result", IsError: tr.IsError})
 		}
 		tr.completed = true
 	case "turn/failed", "error":
 		tr.IsError = true
-		tr.ErrMsg, _ = params["message"].(string)
+		tr.ErrMsg = stringField(params, "message")
 		if tr.ErrMsg == "" {
 			tr.ErrMsg = method
 		}
