@@ -3,6 +3,7 @@ package codex
 import (
 	"context"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -223,7 +224,7 @@ func TestStreamResponderCloseRemovesGatewayHome(t *testing.T) {
 		t.Fatalf("CODEX_HOME does not exist before Close: %v", err)
 	}
 
-	r := &streamResponder{gatewayHome: home}
+	r := &streamResponder{gatewayHomeRemovedOnClose: home}
 	if err := r.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
@@ -335,29 +336,36 @@ func tempCodexHomes(t *testing.T) int {
 	return len(m)
 }
 
+func homeBehindAFile(tb testing.TB) string {
+	tb.Helper()
+	blocker := filepath.Join(tb.TempDir(), "file")
+	if err := os.WriteFile(blocker, nil, 0o600); err != nil {
+		tb.Fatal(err)
+	}
+	return filepath.Join(blocker, "home")
+}
+
 func TestDiscardGatewayHomeJoinsARemovalFailure(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root removes a directory whatever its parent's mode")
-	}
-	parent := t.TempDir()
-	home := filepath.Join(parent, "home")
-	if err := os.Mkdir(home, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(parent, 0o500); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := os.Chmod(parent, 0o700); err != nil {
-			t.Error(err)
-		}
-	})
 	cause := errors.New("the backend refused to start")
-	err := discardGatewayHome(home, cause)
+	err := discardGatewayHome(homeBehindAFile(t), cause)
 	if !errors.Is(err, cause) {
 		t.Fatalf("err = %v, want the original failure kept", err)
 	}
-	if !errors.Is(err, fs.ErrPermission) {
+	if _, ok := errors.AsType[*fs.PathError](err); !ok {
+		t.Fatalf("err = %v, want the removal failure joined to it", err)
+	}
+}
+
+func TestStreamResponderCloseReportsEverySessionAndCleanupFailure(t *testing.T) {
+	r := &streamResponder{
+		sess:                      newAppSession(nopWriteCloser{io.Discard}, &countingCloser{Reader: strings.NewReader("")}),
+		gatewayHomeRemovedOnClose: homeBehindAFile(t),
+	}
+	err := r.Close()
+	if !errors.Is(err, errCloseFailed) {
+		t.Fatalf("err = %v, want the session close failure", err)
+	}
+	if _, ok := errors.AsType[*fs.PathError](err); !ok {
 		t.Fatalf("err = %v, want the removal failure joined to it", err)
 	}
 }

@@ -67,7 +67,7 @@ func checkGatewayPair(env map[string]string) error {
 	return nil
 }
 
-// NewBackend builds a configured Codex backend.
+// NewBackend builds a configured Codex backend. ctx must not be nil.
 func NewBackend(ctx context.Context, cfg Config) (contracts.Backend, error) {
 	if err := checkGatewayPair(cfg.Env); err != nil {
 		return nil, err
@@ -103,7 +103,7 @@ func NewBackend(ctx context.Context, cfg Config) (contracts.Backend, error) {
 			run: func(ctx context.Context, p contracts.Prompt) (string, error) {
 				return runCmd(ctx, cmd, spec.model, spec.effort, cfg.Dir, cfg.Verbose, cfg.Env, p)
 			},
-			gatewayHome: gatewayHome,
+			gatewayHomeRemovedOnClose: gatewayHome,
 		}, nil
 	case kindStream:
 		spec := commandOverrides(cfg.Cmd, cfg.Model, cfg.Effort)
@@ -115,10 +115,10 @@ func NewBackend(ctx context.Context, cfg Config) (contracts.Backend, error) {
 				run: func(ctx context.Context, p contracts.Prompt) (string, error) {
 					return runCmd(ctx, cmd, cfg.Model, cfg.Effort, cfg.Dir, cfg.Verbose, cfg.Env, p)
 				},
-				gatewayHome: gatewayHome,
+				gatewayHomeRemovedOnClose: gatewayHome,
 			}, nil
 		}
-		responder := &streamResponder{base: streamBase(spec.argv), model: cfg.Model, effort: cfg.Effort, dir: cfg.Dir, verbose: cfg.Verbose, resumeID: cfg.ResumeID, env: cfg.Env, gatewayHome: gatewayHome, ap: approvals}
+		responder := &streamResponder{base: streamBase(spec.argv), model: cfg.Model, effort: cfg.Effort, dir: cfg.Dir, verbose: cfg.Verbose, resumeID: cfg.ResumeID, env: cfg.Env, gatewayHomeRemovedOnClose: gatewayHome, approvalsIfGated: approvals}
 		responder.start = responder.launchedWithin(ctx)
 		return responder, nil
 	default:
@@ -222,12 +222,25 @@ func runCmd(ctx context.Context, cmdStr, model, effort, dir string, verbose bool
 	}
 	out, err := cmd.Output()
 	if err != nil {
-		if detail := strings.TrimSpace(errBuf.String()); detail != "" {
-			return parseExecOutput(string(out)), fmt.Errorf("codex exec failed: %w: %s", err, detail)
-		}
-		return parseExecOutput(string(out)), fmt.Errorf("codex exec failed: %w", err)
+		return parseExecOutput(string(out)), &execError{cause: err, stderr: strings.TrimSpace(errBuf.String())}
 	}
 	return parseExecOutput(string(out)), nil
+}
+
+type execError struct {
+	cause  error
+	stderr string
+}
+
+func (e *execError) Error() string {
+	if e.stderr == "" {
+		return fmt.Sprintf("codex exec failed: %v", e.cause)
+	}
+	return fmt.Sprintf("codex exec failed: %v: %s", e.cause, e.stderr)
+}
+
+func (e *execError) Unwrap() error {
+	return e.cause
 }
 
 func execArgs(fields []string, model, effort string) []string {

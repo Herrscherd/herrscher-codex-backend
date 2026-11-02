@@ -2,6 +2,7 @@ package codex
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -119,11 +120,16 @@ func TestRunCmdErrorIncludesStderr(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error from a failing command")
 	}
-	if !strings.Contains(err.Error(), "codex exec failed") {
-		t.Fatalf("error = %q, want it to mention codex exec failed", err)
+	failure, ok := errors.AsType[*execError](err)
+	if !ok {
+		t.Fatalf("err = %v, want an *execError", err)
 	}
-	if !strings.Contains(err.Error(), "codex: model not found") {
-		t.Fatalf("error = %q, want it to carry the child's stderr", err)
+	if failure.stderr != "codex: model not found" {
+		t.Fatalf("stderr = %q, want the child's stderr", failure.stderr)
+	}
+	exitErr, ok := errors.AsType[*exec.ExitError](err)
+	if !ok || exitErr.ExitCode() != 7 {
+		t.Fatalf("err = %v, want the child's exit status 7", err)
 	}
 }
 

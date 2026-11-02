@@ -207,14 +207,14 @@ func TestInitializeCtxAbortsOnCancel(t *testing.T) {
 	cancel()
 
 	done := make(chan error, 1)
-	go func() { done <- s.initializeCtx(ctx, "") }()
+	go func() { done <- s.initializeWithinTurn(ctx, "") }()
 	select {
 	case err := <-done:
 		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("initializeCtx err = %v, want context.Canceled", err)
+			t.Fatalf("initializeWithinTurn err = %v, want context.Canceled", err)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("initializeCtx did not honour a cancelled ctx")
+		t.Fatal("initializeWithinTurn did not honour a cancelled ctx")
 	}
 }
 

@@ -20,7 +20,7 @@ import (
 type oneShotResponder struct {
 	run func(context.Context, contracts.Prompt) (string, error)
 
-	gatewayHome string
+	gatewayHomeRemovedOnClose string
 }
 
 func (o *oneShotResponder) Respond(ctx context.Context, p contracts.Prompt, _ func(contracts.BackendEvent)) (string, error) {
@@ -28,25 +28,25 @@ func (o *oneShotResponder) Respond(ctx context.Context, p contracts.Prompt, _ fu
 }
 
 func (o *oneShotResponder) Close() error {
-	if o.gatewayHome == "" {
+	if o.gatewayHomeRemovedOnClose == "" {
 		return nil
 	}
-	return os.RemoveAll(o.gatewayHome)
+	return os.RemoveAll(o.gatewayHomeRemovedOnClose)
 }
 
 type streamResponder struct {
-	start              func(callCtx context.Context, resume string) (*appSession, error)
-	base               []string
-	model, effort, dir string
-	verbose            bool
-	resumeID           string
-	env                map[string]string
-	gatewayHome        string
-	ap                 *approver
-	mu                 sync.Mutex
-	sess               *appSession
-	tokenMu            sync.Mutex
-	token              string
+	start                     func(turnCtx context.Context, resume string) (*appSession, error)
+	base                      []string
+	model, effort, dir        string
+	verbose                   bool
+	resumeID                  string
+	env                       map[string]string
+	gatewayHomeRemovedOnClose string
+	approvalsIfGated          *approver
+	mu                        sync.Mutex
+	sess                      *appSession
+	tokenMu                   sync.Mutex
+	token                     string
 }
 
 var errTurnNotStarted = errors.New("codex: app-server closed before any turn output")
@@ -141,12 +141,11 @@ func (r *streamResponder) Close() error {
 	if r.sess != nil {
 		sessErr = r.sess.Close()
 	}
-	if r.gatewayHome != "" {
-		if err := os.RemoveAll(r.gatewayHome); err != nil && sessErr == nil {
-			return err
-		}
+	var homeErr error
+	if r.gatewayHomeRemovedOnClose != "" {
+		homeErr = os.RemoveAll(r.gatewayHomeRemovedOnClose)
 	}
-	return sessErr
+	return errors.Join(sessErr, homeErr)
 }
 
 func streamBase(fields []string) []string {
@@ -157,8 +156,8 @@ func streamBase(fields []string) []string {
 }
 
 func (r *streamResponder) launchedWithin(lifetime context.Context) func(context.Context, string) (*appSession, error) {
-	return func(callCtx context.Context, resume string) (*appSession, error) {
-		return startAppSession(lifetime, callCtx, r.base, r.model, r.effort, r.dir, r.verbose, resume, r.env, r.ap)
+	return func(turnCtx context.Context, resume string) (*appSession, error) {
+		return startAppSession(lifetime, turnCtx, r.base, r.model, r.effort, r.dir, r.verbose, resume, r.env, r.approvalsIfGated)
 	}
 }
 
@@ -194,7 +193,7 @@ type appSession struct {
 	threadID           string
 	model, effort, dir string
 	nextID             int
-	ap                 *approver
+	approvalsIfGated   *approver
 	closeOnce          sync.Once
 	closeErr           error
 }
@@ -296,9 +295,9 @@ func (s *appSession) initialize(resume string) error {
 	return nil
 }
 
-func startAppSession(procCtx, callCtx context.Context, base []string, model, effort, dir string, verbose bool, resume string, env map[string]string, approvals *approver) (*appSession, error) {
+func startAppSession(lifetimeCtx, turnCtx context.Context, base []string, model, effort, dir string, verbose bool, resume string, env map[string]string, approvals *approver) (*appSession, error) {
 	argv := appServerArgv(base, approvals != nil)
-	cmd := exec.CommandContext(procCtx, argv[0], argv[1:]...)
+	cmd := exec.CommandContext(lifetimeCtx, argv[0], argv[1:]...)
 	cmd.Dir = dir
 	cmd.Env = contracts.MergeEnv(os.Environ(), env)
 	if verbose {
@@ -322,8 +321,8 @@ func startAppSession(procCtx, callCtx context.Context, base []string, model, eff
 	session.model = model
 	session.effort = effort
 	session.dir = dir
-	session.ap = approvals
-	if err := session.initializeCtx(callCtx, resume); err != nil {
+	session.approvalsIfGated = approvals
+	if err := session.initializeWithinTurn(turnCtx, resume); err != nil {
 		if closeErr := session.Close(); closeErr != nil {
 			return nil, errors.Join(err, closeErr)
 		}
@@ -332,18 +331,22 @@ func startAppSession(procCtx, callCtx context.Context, base []string, model, eff
 	return session, nil
 }
 
-func (s *appSession) initializeCtx(ctx context.Context, resume string) error {
+func (s *appSession) initializeWithinTurn(ctx context.Context, resume string) error {
 	done := make(chan error, 1)
 	go func() { done <- s.initialize(resume) }()
 	select {
 	case err := <-done:
 		return err
 	case <-ctx.Done():
-		s.abort()
-		if initErr := <-done; initErr != nil {
-			slog.Debug("initialize ended with the aborted session", "error", initErr)
-		}
+		s.abortAndJoinHandshake(done)
 		return ctx.Err()
+	}
+}
+
+func (s *appSession) abortAndJoinHandshake(done <-chan error) {
+	s.abort()
+	if initErr := <-done; initErr != nil {
+		slog.Debug("initialize ended with the aborted session", "error", initErr)
 	}
 }
 
@@ -362,7 +365,7 @@ func (s *appSession) Send(ctx context.Context, text string, onEvent func(contrac
 	}
 	result := make(chan turnOutcome, 1)
 	go func() {
-		tr, err := readTurn(ctx, s.out, onEvent, s.ap, s.write)
+		tr, err := readTurn(ctx, s.out, onEvent, s.approvalsIfGated, s.write)
 		result <- turnOutcome{turn: tr, err: err}
 	}()
 	select {
@@ -382,12 +385,12 @@ type turnCollector struct {
 	observed bool
 }
 
-func readTurn(ctx context.Context, reader *bufio.Reader, onEvent func(contracts.BackendEvent), approvals *approver, respond func(map[string]any) error) (turnResult, error) {
+func readTurn(ctx context.Context, reader *bufio.Reader, onEvent func(contracts.BackendEvent), approvals *approver, respondHoldingSendLock func(map[string]any) error) (turnResult, error) {
 	collector := &turnCollector{onEvent: onEvent}
 	for {
 		line, err := reader.ReadBytes('\n')
 		if len(line) > 0 {
-			result, done, handleErr := collector.consumeLine(ctx, line, approvals, respond)
+			result, done, handleErr := collector.consumeLine(ctx, line, approvals, respondHoldingSendLock)
 			if done || handleErr != nil {
 				return result, handleErr
 			}
@@ -398,7 +401,7 @@ func readTurn(ctx context.Context, reader *bufio.Reader, onEvent func(contracts.
 	}
 }
 
-func (c *turnCollector) consumeLine(ctx context.Context, line []byte, approvals *approver, respond func(map[string]any) error) (turnResult, bool, error) {
+func (c *turnCollector) consumeLine(ctx context.Context, line []byte, approvals *approver, respondHoldingSendLock func(map[string]any) error) (turnResult, bool, error) {
 	var msg map[string]any
 	if err := json.Unmarshal(line, &msg); err != nil {
 		slog.Debug("skipping a line from codex that is not a JSON object", "error", err)
@@ -409,7 +412,7 @@ func (c *turnCollector) consumeLine(ctx context.Context, line []byte, approvals 
 		return c.reject(rpcErr), true, nil
 	}
 	if isServerRequest(msg) {
-		return turnResult{}, false, answerApproval(ctx, msg, msg["id"], approvals, respond)
+		return turnResult{}, false, answerApproval(ctx, msg, msg["id"], approvals, respondHoldingSendLock)
 	}
 	c.handleAppEvent(msg)
 	if c.finished() {
