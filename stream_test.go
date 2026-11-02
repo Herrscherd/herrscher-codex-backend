@@ -387,3 +387,87 @@ func TestStopProcessIgnoresTheExitStatusOfTheChild(t *testing.T) {
 		t.Fatalf("stopProcess = %v, want nil for a child stopped on Close", err)
 	}
 }
+
+type turnProbe struct {
+	mu      sync.Mutex
+	calls   int
+	entered chan struct{}
+	release chan struct{}
+	forward io.Writer
+}
+
+func (p *turnProbe) Write(data []byte) (int, error) {
+	p.mu.Lock()
+	p.calls++
+	first := p.calls == 1
+	p.mu.Unlock()
+	if first {
+		p.entered <- struct{}{}
+		<-p.release
+	}
+	return p.forward.Write(data)
+}
+
+func (p *turnProbe) Close() error { return nil }
+
+func (p *turnProbe) count() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.calls
+}
+
+func serveTurns(in io.Reader, out *io.PipeWriter) error {
+	reader := bufio.NewReader(in)
+	for {
+		if _, err := reader.ReadBytes('\n'); err != nil {
+			return out.Close()
+		}
+		reply := `{"method":"item/agentMessage/delta","params":{"delta":"ok"}}` + "\n" +
+			`{"method":"turn/completed","params":{"turn":{"status":"completed"}}}` + "\n"
+		if _, err := io.WriteString(out, reply); err != nil {
+			return errors.Join(err, out.Close())
+		}
+	}
+}
+
+func TestSendHoldsTheSessionForOneTurn(t *testing.T) {
+	reqR, reqW := io.Pipe()
+	outR, outW := io.Pipe()
+	served := make(chan error, 1)
+	go func() { served <- serveTurns(reqR, outW) }()
+	t.Cleanup(func() {
+		closeChecked(t, reqW)
+		if err := <-served; err != nil {
+			t.Errorf("serve turns: %v", err)
+		}
+	})
+	probe := &turnProbe{entered: make(chan struct{}, 1), release: make(chan struct{}), forward: reqW}
+	s := newAppSession(probe, outR)
+	s.threadID = "thread-1"
+
+	first := make(chan error, 1)
+	go func() {
+		_, err := s.Send(context.Background(), "one", nil)
+		first <- err
+	}()
+	<-probe.entered
+
+	second := make(chan error, 1)
+	go func() {
+		_, err := s.Send(context.Background(), "two", nil)
+		second <- err
+	}()
+	time.Sleep(100 * time.Millisecond)
+	writesWhileFirstInFlight := probe.count()
+	close(probe.release)
+
+	if writesWhileFirstInFlight != 1 {
+		t.Errorf("a second turn wrote %d requests while the first was in flight, want 1", writesWhileFirstInFlight)
+	}
+	if err := <-first; err != nil {
+		t.Errorf("first Send: %v", err)
+	}
+	if err := <-second; err != nil {
+		t.Errorf("second Send: %v", err)
+	}
+}
