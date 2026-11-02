@@ -194,6 +194,12 @@ func TestInitializeCtxAbortsOnCancel(t *testing.T) {
 		_, err := io.Copy(io.Discard, inR)
 		drained <- err
 	}()
+	t.Cleanup(func() {
+		closeChecked(t, inW)
+		if err := <-drained; err != nil {
+			t.Errorf("drain stdin: %v", err)
+		}
+	})
 	stdoutR, stdoutW := io.Pipe()
 	defer closeChecked(t, stdoutW)
 	s := newAppSession(inW, stdoutR)
