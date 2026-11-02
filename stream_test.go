@@ -7,6 +7,8 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -219,6 +221,65 @@ func TestInitializeCtxAbortsOnCancel(t *testing.T) {
 	}
 }
 
+func TestAppSessionSendWaitsForItsReaderOnCancel(t *testing.T) {
+	stdout := newBlockingReader()
+	s := newAppSession(nopWriteCloser{io.Discard}, stdout)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if _, err := s.Send(ctx, "hi", nil); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err=%v, want context.DeadlineExceeded", err)
+	}
+	if !stdout.exited.Load() {
+		t.Fatal("Send returned while its reader was still running")
+	}
+}
+
+func TestAppSessionCloseClosesOnceAndReportsItsError(t *testing.T) {
+	out := &countingCloser{Reader: strings.NewReader("")}
+	s := newAppSession(nopWriteCloser{io.Discard}, out)
+	first := s.Close()
+	second := s.Close()
+	if !errors.Is(first, errCloseFailed) || !errors.Is(second, errCloseFailed) {
+		t.Fatalf("Close errors = %v, %v; want errCloseFailed twice", first, second)
+	}
+	if out.calls != 1 {
+		t.Fatalf("underlying Close called %d times, want 1", out.calls)
+	}
+}
+
+var errCloseFailed = errors.New("close failed")
+
+type countingCloser struct {
+	io.Reader
+	calls int
+}
+
+func (c *countingCloser) Close() error {
+	c.calls++
+	return errCloseFailed
+}
+
+type blockingReader struct {
+	closed    chan struct{}
+	closeOnce sync.Once
+	exited    atomic.Bool
+}
+
+func newBlockingReader() *blockingReader {
+	return &blockingReader{closed: make(chan struct{})}
+}
+
+func (b *blockingReader) Read([]byte) (int, error) {
+	<-b.closed
+	b.exited.Store(true)
+	return 0, io.ErrClosedPipe
+}
+
+func (b *blockingReader) Close() error {
+	b.closeOnce.Do(func() { close(b.closed) })
+	return nil
+}
+
 func TestReadTurnDistinguishesAStartedTurnFromASilentServer(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -241,6 +302,51 @@ func TestReadTurnDistinguishesAStartedTurnFromASilentServer(t *testing.T) {
 				t.Fatalf("underlying error lost: %v", err)
 			}
 		})
+	}
+}
+
+func TestRespondReopensTheThreadWhenTheServerDiesBeforeTheTurn(t *testing.T) {
+	var resumed []string
+	r := &streamResponder{}
+	r.start = func(_ context.Context, resume string) (*appSession, error) {
+		resumed = append(resumed, resume)
+		if len(resumed) == 1 {
+			s := newAppSession(nopWriteCloser{io.Discard}, strings.NewReader(""))
+			s.threadID = "thread-1"
+			return s, nil
+		}
+		inR, inW := io.Pipe()
+		outR, outW := io.Pipe()
+		replies := make(chan error, 1)
+		go func() { replies <- replyOnce(inR, outW) }()
+		t.Cleanup(func() {
+			if err := <-replies; err != nil {
+				t.Errorf("reply: %v", err)
+			}
+		})
+		s := newAppSession(inW, outR)
+		s.threadID = "thread-2"
+		return s, nil
+	}
+	var events []contracts.BackendEvent
+	got, err := r.Respond(context.Background(), contracts.Prompt{Content: "hi"}, func(e contracts.BackendEvent) { events = append(events, e) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "ok" {
+		t.Fatalf("text=%q want ok", got)
+	}
+	if strings.Join(resumed, ",") != ",thread-1" {
+		t.Fatalf("starts resumed %q, want the first start then thread-1", resumed)
+	}
+	if len(events) == 0 || events[0].Kind != "reset" {
+		t.Fatalf("events=%+v, want a leading reset", events)
+	}
+	if r.ResumeToken() != "thread-2" {
+		t.Fatalf("token=%q want thread-2", r.ResumeToken())
+	}
+	if err := r.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -113,7 +113,9 @@ func NewBackend(ctx context.Context, c Config) (contracts.Backend, error) {
 				gatewayHome: gatewayHome,
 			}, nil
 		}
-		return &streamResponder{ctx: ctx, base: streamBase(base), model: c.Model, effort: c.Effort, dir: c.Dir, verbose: c.Verbose, resumeID: c.ResumeID, env: c.Env, gatewayHome: gatewayHome, ap: ap}, nil
+		responder := &streamResponder{base: streamBase(base), model: c.Model, effort: c.Effort, dir: c.Dir, verbose: c.Verbose, resumeID: c.ResumeID, env: c.Env, gatewayHome: gatewayHome, ap: ap}
+		responder.start = responder.launchedWithin(ctx)
+		return responder, nil
 	default:
 		return fail(fmt.Errorf("%w %q", errUnknownKind, kind))
 	}

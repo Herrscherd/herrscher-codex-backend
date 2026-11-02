@@ -35,7 +35,7 @@ func (o *oneShotResponder) Close() error {
 }
 
 type streamResponder struct {
-	ctx                context.Context
+	start              func(callCtx context.Context, resume string) (*appSession, error)
 	base               []string
 	model, effort, dir string
 	verbose            bool
@@ -66,37 +66,17 @@ func (r *streamResponder) Respond(ctx context.Context, p contracts.Prompt, onEve
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.sess == nil {
-		s, err := startAppSession(r.ctx, ctx, r.base, r.model, r.effort, r.dir, r.verbose, r.resumeID, r.env, r.ap)
-		if err != nil {
+		if err := r.open(ctx, r.resumeID); err != nil {
 			return "", err
 		}
-		r.sess = s
-		r.rememberToken(s.threadID)
 	}
 	content := withContext(p.Context, withAttachments(p.Content, p.Attachments))
 	tr, err := r.sess.Send(ctx, content, onEvent)
 	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return "", err
+		if !restartable(err) {
+			return "", turnError(err)
 		}
-		if !errors.Is(err, errTurnNotStarted) {
-			return "", fmt.Errorf("codex turn: %w", err)
-		}
-		if onEvent != nil {
-			onEvent(contracts.BackendEvent{Kind: "reset"})
-		}
-		resume := r.sess.threadID
-		if closeErr := r.sess.Close(); closeErr != nil {
-			slog.Warn("previous app-server session did not close cleanly", "error", closeErr)
-		}
-		s, startErr := startAppSession(r.ctx, ctx, r.base, r.model, r.effort, r.dir, r.verbose, resume, r.env, r.ap)
-		if startErr != nil {
-			return "", startErr
-		}
-		r.sess = s
-		r.rememberToken(s.threadID)
-		tr, err = r.sess.Send(ctx, content, onEvent)
-		if err != nil {
+		if tr, err = r.reopen(ctx, content, onEvent); err != nil {
 			return "", err
 		}
 	}
@@ -104,6 +84,45 @@ func (r *streamResponder) Respond(ctx context.Context, p contracts.Prompt, onEve
 		return tr.Text, fmt.Errorf("%w: %s", errTurnFailed, tr.ErrMsg)
 	}
 	return tr.Text, nil
+}
+
+func (r *streamResponder) open(ctx context.Context, resume string) error {
+	s, err := r.start(ctx, resume)
+	if err != nil {
+		return err
+	}
+	r.sess = s
+	r.rememberToken(s.threadID)
+	return nil
+}
+
+func (r *streamResponder) reopen(ctx context.Context, content string, onEvent func(contracts.BackendEvent)) (turnResult, error) {
+	if onEvent != nil {
+		onEvent(contracts.BackendEvent{Kind: "reset"})
+	}
+	resume := r.sess.threadID
+	if closeErr := r.sess.Close(); closeErr != nil {
+		slog.Warn("previous app-server session did not close cleanly", "error", closeErr)
+	}
+	if err := r.open(ctx, resume); err != nil {
+		return turnResult{}, err
+	}
+	return r.sess.Send(ctx, content, onEvent)
+}
+
+func restartable(err error) bool {
+	return errors.Is(err, errTurnNotStarted) && !isContextError(err)
+}
+
+func turnError(err error) error {
+	if isContextError(err) {
+		return err
+	}
+	return fmt.Errorf("codex turn: %w", err)
+}
+
+func isContextError(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 func (r *streamResponder) ResumeToken() string {
@@ -137,6 +156,12 @@ func streamBase(fields []string) []string {
 	return fields
 }
 
+func (r *streamResponder) launchedWithin(lifetime context.Context) func(context.Context, string) (*appSession, error) {
+	return func(callCtx context.Context, resume string) (*appSession, error) {
+		return startAppSession(lifetime, callCtx, r.base, r.model, r.effort, r.dir, r.verbose, resume, r.env, r.ap)
+	}
+}
+
 func appServerArgv(base []string, gated bool) []string {
 	argv := append([]string{}, base...)
 	argv = append(argv,
@@ -155,6 +180,11 @@ type turnResult struct {
 	completed bool
 }
 
+type turnOutcome struct {
+	turn turnResult
+	err  error
+}
+
 type appSession struct {
 	mu                 sync.Mutex
 	stdin              io.WriteCloser
@@ -165,6 +195,8 @@ type appSession struct {
 	model, effort, dir string
 	nextID             int
 	ap                 *approver
+	closeOnce          sync.Once
+	closeErr           error
 }
 
 func newAppSession(stdin io.WriteCloser, out io.Reader) *appSession {
@@ -301,15 +333,14 @@ func startAppSession(procCtx, callCtx context.Context, base []string, model, eff
 }
 
 func (s *appSession) initializeCtx(ctx context.Context, resume string) error {
-	if ctx == nil {
-		return s.initialize(resume)
-	}
 	done := make(chan error, 1)
 	go func() { done <- s.initialize(resume) }()
 	select {
 	case err := <-done:
 		return err
 	case <-ctx.Done():
+		s.abort()
+		<-done
 		return ctx.Err()
 	}
 }
@@ -317,9 +348,6 @@ func (s *appSession) initializeCtx(ctx context.Context, resume string) error {
 func (s *appSession) Send(ctx context.Context, text string, onEvent func(contracts.BackendEvent)) (turnResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	select {
 	case <-ctx.Done():
 		return turnResult{}, ctx.Err()
@@ -330,126 +358,166 @@ func (s *appSession) Send(ctx context.Context, text string, onEvent func(contrac
 	if err := s.write(turnStartRequest(id, s.threadID, text, s.model, s.effort)); err != nil {
 		return turnResult{}, errors.Join(errTurnNotStarted, err)
 	}
-	result := make(chan struct {
-		turn turnResult
-		err  error
-	}, 1)
+	result := make(chan turnOutcome, 1)
 	go func() {
 		tr, err := readTurn(ctx, s.out, onEvent, s.ap, s.write)
-		result <- struct {
-			turn turnResult
-			err  error
-		}{tr, err}
+		result <- turnOutcome{turn: tr, err: err}
 	}()
 	select {
 	case done := <-result:
 		return done.turn, done.err
 	case <-ctx.Done():
-		if err := s.abort(); err != nil {
-			return turnResult{}, errors.Join(ctx.Err(), err)
-		}
+		s.abort()
+		<-result
 		return turnResult{}, ctx.Err()
 	}
 }
 
+type turnCollector struct {
+	onEvent  func(contracts.BackendEvent)
+	result   turnResult
+	deltas   strings.Builder
+	observed bool
+}
+
 func readTurn(ctx context.Context, r *bufio.Reader, onEvent func(contracts.BackendEvent), ap *approver, respond func(map[string]any) error) (turnResult, error) {
-	var tr turnResult
-	var text strings.Builder
-	observed := false
+	c := &turnCollector{onEvent: onEvent}
 	for {
 		line, err := r.ReadBytes('\n')
 		if len(line) > 0 {
-			var msg map[string]any
-			if json.Unmarshal(line, &msg) == nil {
-				observed = true
-				if rpcErr, ok := msg["error"].(map[string]any); ok {
-					tr.IsError = true
-					tr.ErrMsg = stringField(rpcErr, "message")
-					if tr.ErrMsg == "" {
-						tr.ErrMsg = "Codex rejected the turn"
-					}
-					if onEvent != nil {
-						onEvent(contracts.BackendEvent{Kind: eventResult, IsError: true})
-					}
-					return tr, nil
-				}
-				if id, ok := msg["id"]; ok && msg[fieldMethod] != nil {
-					if answerErr := answerApproval(ctx, msg, id, ap, respond); answerErr != nil {
-						return turnResult{}, answerErr
-					}
-					continue
-				}
-				handleAppEvent(msg, &tr, &text, onEvent)
-			}
-			if tr.IsError || tr.completed {
-				if tr.Text == "" {
-					tr.Text = text.String()
-				}
-				return tr, nil
+			result, done, handleErr := c.consumeLine(ctx, line, ap, respond)
+			if done || handleErr != nil {
+				return result, handleErr
 			}
 		}
 		if err != nil {
-			if !observed {
-				return tr, errors.Join(errTurnNotStarted, err)
-			}
-			return tr, fmt.Errorf("codex read turn: %w", err)
+			return c.readFailure(err)
 		}
 	}
 }
 
-func handleAppEvent(msg map[string]any, tr *turnResult, text *strings.Builder, onEvent func(contracts.BackendEvent)) {
+func (c *turnCollector) consumeLine(ctx context.Context, line []byte, ap *approver, respond func(map[string]any) error) (turnResult, bool, error) {
+	var msg map[string]any
+	if json.Unmarshal(line, &msg) != nil {
+		return turnResult{}, false, nil
+	}
+	c.observed = true
+	if rpcErr, ok := msg["error"].(map[string]any); ok {
+		return c.reject(rpcErr), true, nil
+	}
+	if isServerRequest(msg) {
+		return turnResult{}, false, answerApproval(ctx, msg, msg["id"], ap, respond)
+	}
+	c.handleAppEvent(msg)
+	if c.finished() {
+		return c.outcome(), true, nil
+	}
+	return turnResult{}, false, nil
+}
+
+func isServerRequest(msg map[string]any) bool {
+	_, hasID := msg["id"]
+	return hasID && msg[fieldMethod] != nil
+}
+
+func (c *turnCollector) reject(rpcErr map[string]any) turnResult {
+	c.result.IsError = true
+	c.result.ErrMsg = stringField(rpcErr, "message")
+	if c.result.ErrMsg == "" {
+		c.result.ErrMsg = "Codex rejected the turn"
+	}
+	c.emit(contracts.BackendEvent{Kind: eventResult, IsError: true})
+	return c.result
+}
+
+func (c *turnCollector) finished() bool {
+	return c.result.IsError || c.result.completed
+}
+
+func (c *turnCollector) outcome() turnResult {
+	if c.result.Text == "" {
+		c.result.Text = c.deltas.String()
+	}
+	return c.result
+}
+
+func (c *turnCollector) readFailure(err error) (turnResult, error) {
+	if !c.observed {
+		return c.result, errors.Join(errTurnNotStarted, err)
+	}
+	return c.result, fmt.Errorf("codex read turn: %w", err)
+}
+
+func (c *turnCollector) handleAppEvent(msg map[string]any) {
 	method := stringField(msg, fieldMethod)
 	params := mapField(msg, fieldParams)
 	switch method {
 	case "item/agentMessage/delta":
-		delta := stringField(params, "delta")
-		if delta != "" {
-			text.WriteString(delta)
-			if onEvent != nil {
-				onEvent(contracts.BackendEvent{Kind: eventText, Detail: delta})
-			}
-		}
+		c.appendDelta(stringField(params, "delta"))
 	case "item/started", "item/completed":
-		item := mapField(params, "item")
-		typ := stringField(item, "type")
-		if typ == "agentMessage" || typ == "agent_message" {
-			if v, ok := item[fieldText].(string); ok && v != "" {
-				tr.Text = v
-			}
-		}
-		if typ == "commandExecution" || typ == "command_execution" {
-			cmd := stringField(item, "command")
-			if onEvent != nil && cmd != "" {
-				onEvent(contracts.BackendEvent{Kind: "tool", Tool: "command", Detail: cmd})
-			}
-		}
+		c.observeItem(mapField(params, "item"))
 	case "turn/completed":
-		turn := mapField(params, "turn")
-		status := stringField(turn, "status")
-		tr.IsError = status == "failed" || status == "error"
-		tr.ErrMsg = stringField(turn, "error")
-		if onEvent != nil {
-			onEvent(contracts.BackendEvent{Kind: eventResult, IsError: tr.IsError})
-		}
-		tr.completed = true
+		c.complete(mapField(params, "turn"))
 	case "turn/failed", "error":
-		tr.IsError = true
-		tr.ErrMsg = stringField(params, "message")
-		if tr.ErrMsg == "" {
-			tr.ErrMsg = method
+		c.fail(method, stringField(params, "message"))
+	}
+}
+
+func (c *turnCollector) appendDelta(delta string) {
+	if delta == "" {
+		return
+	}
+	c.deltas.WriteString(delta)
+	c.emit(contracts.BackendEvent{Kind: eventText, Detail: delta})
+}
+
+func (c *turnCollector) observeItem(item map[string]any) {
+	switch stringField(item, "type") {
+	case "agentMessage", "agent_message":
+		if v, ok := item[fieldText].(string); ok && v != "" {
+			c.result.Text = v
 		}
-		if onEvent != nil {
-			onEvent(contracts.BackendEvent{Kind: eventResult, IsError: true})
+	case "commandExecution", "command_execution":
+		if cmd := stringField(item, "command"); cmd != "" {
+			c.emit(contracts.BackendEvent{Kind: "tool", Tool: "command", Detail: cmd})
 		}
-		tr.completed = true
+	}
+}
+
+func (c *turnCollector) complete(turn map[string]any) {
+	status := stringField(turn, "status")
+	c.result.IsError = status == "failed" || status == "error"
+	c.result.ErrMsg = stringField(turn, "error")
+	c.emit(contracts.BackendEvent{Kind: eventResult, IsError: c.result.IsError})
+	c.result.completed = true
+}
+
+func (c *turnCollector) fail(method, message string) {
+	c.result.IsError = true
+	c.result.ErrMsg = message
+	if c.result.ErrMsg == "" {
+		c.result.ErrMsg = method
+	}
+	c.emit(contracts.BackendEvent{Kind: eventResult, IsError: true})
+	c.result.completed = true
+}
+
+func (c *turnCollector) emit(event contracts.BackendEvent) {
+	if c.onEvent != nil {
+		c.onEvent(event)
 	}
 }
 
 func (s *appSession) Close() error {
-	return s.abort()
+	s.abort()
+	return s.closeErr
 }
 
-func (s *appSession) abort() error {
+func (s *appSession) abort() {
+	s.closeOnce.Do(func() { s.closeErr = s.release() })
+}
+
+func (s *appSession) release() error {
 	var errs []error
 	if s.stdin != nil {
 		errs = append(errs, s.stdin.Close())
