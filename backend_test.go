@@ -6,7 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -76,7 +76,7 @@ func TestExecArgsApproveOnlyNeubloxMCPForNonInteractiveTurns(t *testing.T) {
 		"--model", "gpt-5.6-terra",
 		"-c", "model_reasoning_effort=medium",
 	}
-	if !reflect.DeepEqual(got, want) {
+	if !slices.Equal(got, want) {
 		t.Fatalf("exec args = %v, want %v", got, want)
 	}
 }

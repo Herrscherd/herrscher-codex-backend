@@ -86,8 +86,8 @@ func (r *streamResponder) Respond(ctx context.Context, p contracts.Prompt, onEve
 			onEvent(contracts.BackendEvent{Kind: "reset"})
 		}
 		resume := r.sess.threadID
-		if err := r.sess.Close(); err != nil {
-			slog.Warn("previous app-server session did not close cleanly", "error", err)
+		if closeErr := r.sess.Close(); closeErr != nil {
+			slog.Warn("previous app-server session did not close cleanly", "error", closeErr)
 		}
 		s, startErr := startAppSession(r.ctx, ctx, r.base, r.model, r.effort, r.dir, r.verbose, resume, r.env, r.ap)
 		if startErr != nil {
@@ -132,7 +132,7 @@ func (r *streamResponder) Close() error {
 
 func streamBase(fields []string) []string {
 	if len(fields) == 0 {
-		return []string{"codex"}
+		return []string{codexName}
 	}
 	return fields
 }
@@ -176,7 +176,7 @@ func newAppSession(stdin io.WriteCloser, out io.Reader) *appSession {
 }
 
 func initializeRequest(id int) map[string]any {
-	return map[string]any{"id": id, "method": "initialize", "params": map[string]any{"clientInfo": map[string]any{"name": "herrscher_codex_backend", "title": "Herrscher Codex Backend", "version": "0.1.0"}}}
+	return map[string]any{"id": id, fieldMethod: "initialize", fieldParams: map[string]any{"clientInfo": map[string]any{"name": "herrscher_codex_backend", "title": "Herrscher Codex Backend", "version": "0.1.0"}}}
 }
 
 func threadStartRequest(id int, model, dir, resume string) map[string]any {
@@ -188,20 +188,20 @@ func threadStartRequest(id int, model, dir, resume string) map[string]any {
 		params["cwd"] = dir
 	}
 	if resume != "" {
-		return map[string]any{"id": id, "method": "thread/resume", "params": map[string]any{"threadId": resume}}
+		return map[string]any{"id": id, fieldMethod: "thread/resume", fieldParams: map[string]any{"threadId": resume}}
 	}
-	return map[string]any{"id": id, "method": "thread/start", "params": params}
+	return map[string]any{"id": id, fieldMethod: "thread/start", fieldParams: params}
 }
 
 func turnStartRequest(id int, thread, text, model, effort string) map[string]any {
-	params := map[string]any{"threadId": thread, "input": []any{map[string]any{"type": "text", "text": text}}}
+	params := map[string]any{"threadId": thread, "input": []any{map[string]any{"type": contentText, fieldText: text}}}
 	if model != "" {
 		params["model"] = model
 	}
 	if effort != "" {
 		params["effort"] = effort
 	}
-	return map[string]any{"id": id, "method": "turn/start", "params": params}
+	return map[string]any{"id": id, fieldMethod: "turn/start", fieldParams: params}
 }
 
 func (s *appSession) write(msg map[string]any) error {
@@ -240,7 +240,7 @@ func (s *appSession) initialize(resume string) error {
 	if _, err := s.waitResponse(id); err != nil {
 		return err
 	}
-	if err := s.write(map[string]any{"method": "initialized", "params": map[string]any{}}); err != nil {
+	if err := s.write(map[string]any{fieldMethod: "initialized", fieldParams: map[string]any{}}); err != nil {
 		return err
 	}
 	id = s.nextID
@@ -252,7 +252,7 @@ func (s *appSession) initialize(resume string) error {
 	if err != nil {
 		return err
 	}
-	result := mapField(msg, "result")
+	result := mapField(msg, fieldResult)
 	thread := mapField(result, "thread")
 	s.threadID = stringField(thread, "id")
 	if s.threadID == "" {
@@ -369,13 +369,13 @@ func readTurn(ctx context.Context, r *bufio.Reader, onEvent func(contracts.Backe
 						tr.ErrMsg = "Codex rejected the turn"
 					}
 					if onEvent != nil {
-						onEvent(contracts.BackendEvent{Kind: "result", IsError: true})
+						onEvent(contracts.BackendEvent{Kind: eventResult, IsError: true})
 					}
 					return tr, nil
 				}
-				if id, ok := msg["id"]; ok && msg["method"] != nil {
-					if err := answerApproval(ctx, msg, id, ap, respond); err != nil {
-						return turnResult{}, err
+				if id, ok := msg["id"]; ok && msg[fieldMethod] != nil {
+					if answerErr := answerApproval(ctx, msg, id, ap, respond); answerErr != nil {
+						return turnResult{}, answerErr
 					}
 					continue
 				}
@@ -398,22 +398,22 @@ func readTurn(ctx context.Context, r *bufio.Reader, onEvent func(contracts.Backe
 }
 
 func handleAppEvent(msg map[string]any, tr *turnResult, text *strings.Builder, onEvent func(contracts.BackendEvent)) {
-	method := stringField(msg, "method")
-	params := mapField(msg, "params")
+	method := stringField(msg, fieldMethod)
+	params := mapField(msg, fieldParams)
 	switch method {
 	case "item/agentMessage/delta":
 		delta := stringField(params, "delta")
 		if delta != "" {
 			text.WriteString(delta)
 			if onEvent != nil {
-				onEvent(contracts.BackendEvent{Kind: "text", Detail: delta})
+				onEvent(contracts.BackendEvent{Kind: eventText, Detail: delta})
 			}
 		}
 	case "item/started", "item/completed":
 		item := mapField(params, "item")
 		typ := stringField(item, "type")
 		if typ == "agentMessage" || typ == "agent_message" {
-			if v, ok := item["text"].(string); ok && v != "" {
+			if v, ok := item[fieldText].(string); ok && v != "" {
 				tr.Text = v
 			}
 		}
@@ -429,7 +429,7 @@ func handleAppEvent(msg map[string]any, tr *turnResult, text *strings.Builder, o
 		tr.IsError = status == "failed" || status == "error"
 		tr.ErrMsg = stringField(turn, "error")
 		if onEvent != nil {
-			onEvent(contracts.BackendEvent{Kind: "result", IsError: tr.IsError})
+			onEvent(contracts.BackendEvent{Kind: eventResult, IsError: tr.IsError})
 		}
 		tr.completed = true
 	case "turn/failed", "error":
@@ -439,7 +439,7 @@ func handleAppEvent(msg map[string]any, tr *turnResult, text *strings.Builder, o
 			tr.ErrMsg = method
 		}
 		if onEvent != nil {
-			onEvent(contracts.BackendEvent{Kind: "result", IsError: true})
+			onEvent(contracts.BackendEvent{Kind: eventResult, IsError: true})
 		}
 		tr.completed = true
 	}

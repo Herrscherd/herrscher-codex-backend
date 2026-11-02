@@ -57,7 +57,7 @@ func (a *approver) allow(ctx context.Context, tool, subject string) bool {
 	return verdict.Decision == "allow"
 }
 
-func approvalSubject(method string, params map[string]any) (tool, subject string, ok bool) {
+func approvalSubject(method string, params map[string]any) (string, string, bool) {
 	switch method {
 	case "item/commandExecution/requestApproval", "execCommandApproval":
 		cmd := stringField(params, "command")
@@ -79,7 +79,7 @@ func approvalResponse(id any, allow bool) map[string]any {
 	if allow {
 		decision = "accept"
 	}
-	return map[string]any{"id": id, "result": map[string]any{"decision": decision}}
+	return map[string]any{"id": id, fieldResult: map[string]any{"decision": decision}}
 }
 
 func approvalPolicy(gated bool) string {
@@ -90,7 +90,7 @@ func approvalPolicy(gated bool) string {
 }
 
 func answerApproval(ctx context.Context, msg map[string]any, id any, ap *approver, respond func(map[string]any) error) error {
-	method := stringField(msg, "method")
+	method := stringField(msg, fieldMethod)
 	params := mapField(msg, "params")
 	tool, subject, known := approvalSubject(method, params)
 	if !known {

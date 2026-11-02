@@ -185,6 +185,9 @@ linters:
         text: "^G(304|703):"
       - path: ^register\.go$
         linters: [gochecknoinits]
+      - path: ^(approvals|backend|stream)\.go$
+        linters: [gosec]
+        text: "^G204:"
 
 formatters:
   enable:

@@ -36,9 +36,9 @@ func resolveBackend(kind string, stream bool) string {
 		return kind
 	}
 	if stream {
-		return "stream"
+		return kindStream
 	}
-	return "oneshot"
+	return kindOneShot
 }
 
 var errGatewayPairRefused = errors.New("refusing to spawn")
@@ -88,7 +88,7 @@ func NewBackend(ctx context.Context, c Config) (contracts.Backend, error) {
 	ap := approverFromEnv()
 	kind := resolveBackend(c.Kind, c.Stream)
 	switch kind {
-	case "oneshot":
+	case kindOneShot:
 		warnOneShotUngated(ap, os.Stderr)
 		cmd, model, effort := oneShotCommand(c.Cmd, c.Model, c.Effort)
 		if cmd == "" {
@@ -100,7 +100,7 @@ func NewBackend(ctx context.Context, c Config) (contracts.Backend, error) {
 			},
 			gatewayHome: gatewayHome,
 		}, nil
-	case "stream":
+	case kindStream:
 		base, model, effort := commandOverrides(c.Cmd, c.Model, c.Effort)
 		c.Model, c.Effort = model, effort
 		if runtime.GOOS == "windows" && os.Getenv("HERRSCHER_CODEX_ONESHOT_WINDOWS") == "1" {
@@ -135,7 +135,9 @@ func oneShotCommand(cmd, model, effort string) (string, string, string) {
 	return strings.Join(base, " "), model, effort
 }
 
-func streamCommand(fields []string) (base []string, model, effort string) {
+func streamCommand(fields []string) ([]string, string, string) {
+	var base []string
+	var model, effort string
 	for i := 0; i < len(fields); i++ {
 		switch fields[i] {
 		case "--model", "-m":
@@ -237,7 +239,7 @@ func execArgs(fields []string, model, effort string) []string {
 	return args
 }
 
-func execPrompt(content string) (argument, stdin string) {
+func execPrompt(content string) (string, string) {
 	return "-", content
 }
 

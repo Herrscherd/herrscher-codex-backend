@@ -2,20 +2,28 @@ package codex
 
 import contracts "github.com/Herrscherd/herrscher-contracts"
 
-var efforts = []string{"low", "medium", "high", "xhigh", "max", "ultra"}
+const (
+	modelGPT56Sol   = "gpt-5.6-sol"
+	modelGPT56Terra = "gpt-5.6-terra"
+	modelGPT56Luna  = "gpt-5.6-luna"
+	modelGPT55      = "gpt-5.5"
+	modelO4Mini     = "o4-mini"
+)
 
-// Models is the catalog of the OpenAI runtime. IDs and labels are drawn from
-// MODEL_CATALOG.codex in the app, which becomes obsolete once this source
-// takes over. Prices are absent (0 = unknown): they already were on the app
-// side.
-var Models = []contracts.ModelSpec{
-	{ID: "gpt-5.6-sol", Label: "GPT-5.6 Sol", Arg: "gpt-5.6-sol", Efforts: efforts, Route: contracts.RouteNative},
-	{ID: "gpt-5.6-terra", Label: "GPT-5.6 Terra", Arg: "gpt-5.6-terra", Efforts: efforts, Route: contracts.RouteNative},
-	{ID: "gpt-5.6-luna", Label: "GPT-5.6 Luna", Arg: "gpt-5.6-luna", Efforts: []string{"low", "medium", "high", "xhigh", "max"}, Route: contracts.RouteNative},
-	{ID: "gpt-5-codex", Label: "GPT-5 Codex", Arg: "gpt-5-codex", Route: contracts.RouteNative},
-	{ID: "gpt-5.5", Label: "GPT-5.5", Arg: "gpt-5.5", Route: contracts.RouteNative},
-	{ID: "o4-mini", Label: "o4-mini", Arg: "o4-mini", Route: contracts.RouteNative},
+func codexEfforts() []string {
+	return []string{"low", "medium", "high", "xhigh", "max", "ultra"}
+}
 
-	{ID: "gw-gpt-5.6-sol", Label: "GPT-5.6 Sol", Arg: "gpt-5.6-sol", Efforts: efforts, Route: contracts.RouteGateway},
-	{ID: "gw-gpt-5.5", Label: "GPT-5.5", Arg: "gpt-5.5", Route: contracts.RouteGateway},
+func Models() []contracts.ModelSpec {
+	return []contracts.ModelSpec{
+		{ID: modelGPT56Sol, Label: "GPT-5.6 Sol", Arg: modelGPT56Sol, Efforts: codexEfforts(), Route: contracts.RouteNative},
+		{ID: modelGPT56Terra, Label: "GPT-5.6 Terra", Arg: modelGPT56Terra, Efforts: codexEfforts(), Route: contracts.RouteNative},
+		{ID: modelGPT56Luna, Label: "GPT-5.6 Luna", Arg: modelGPT56Luna, Efforts: []string{"low", "medium", "high", "xhigh", "max"}, Route: contracts.RouteNative},
+		{ID: "gpt-5-codex", Label: "GPT-5 Codex", Arg: "gpt-5-codex", Route: contracts.RouteNative},
+		{ID: modelGPT55, Label: "GPT-5.5", Arg: modelGPT55, Route: contracts.RouteNative},
+		{ID: modelO4Mini, Label: "o4-mini", Arg: modelO4Mini, Route: contracts.RouteNative},
+
+		{ID: "gw-gpt-5.6-sol", Label: "GPT-5.6 Sol", Arg: modelGPT56Sol, Efforts: codexEfforts(), Route: contracts.RouteGateway},
+		{ID: "gw-gpt-5.5", Label: "GPT-5.5", Arg: modelGPT55, Route: contracts.RouteGateway},
+	}
 }

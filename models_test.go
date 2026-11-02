@@ -7,14 +7,14 @@ import (
 )
 
 func TestModelsAreValid(t *testing.T) {
-	if err := contracts.ValidateModels("codex", Models); err != nil {
+	if err := contracts.ValidateModels("codex", Models()); err != nil {
 		t.Fatalf("codex model catalog is invalid: %v", err)
 	}
 }
 
 func TestGatewayModelsExist(t *testing.T) {
 	var n int
-	for _, m := range Models {
+	for _, m := range Models() {
 		if m.Route == contracts.RouteGateway {
 			n++
 		}
@@ -31,8 +31,8 @@ func TestManifestPublishesModels(t *testing.T) {
 			continue
 		}
 		found = true
-		if len(p.Manifest.Models) != len(Models) {
-			t.Fatalf("manifest published %d models, catalog has %d", len(p.Manifest.Models), len(Models))
+		if len(p.Manifest.Models) != len(Models()) {
+			t.Fatalf("manifest published %d models, catalog has %d", len(p.Manifest.Models), len(Models()))
 		}
 	}
 	if !found {
