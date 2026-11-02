@@ -117,7 +117,7 @@ func (a *approver) warnUnrecognisedApproval(method string) {
 		return
 	}
 	if a.warned == nil {
-		a.warned = map[string]bool{}
+		a.warned = make(map[string]bool)
 	}
 	a.warned[method] = true
 	writeWarning(a.warn, fmt.Sprintf("herrscher: unrecognised approval request %q auto-accepted in session %q\n", method, a.session))

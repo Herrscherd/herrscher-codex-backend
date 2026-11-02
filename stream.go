@@ -212,7 +212,7 @@ func initializeRequest(id int) map[string]any {
 }
 
 func threadStartRequest(id int, model, dir, resume string) map[string]any {
-	params := map[string]any{}
+	params := make(map[string]any)
 	if model != "" {
 		params["model"] = model
 	}
@@ -272,7 +272,7 @@ func (s *appSession) initialize(resume string) error {
 	if _, err := s.waitResponse(id); err != nil {
 		return err
 	}
-	if err := s.write(map[string]any{fieldMethod: "initialized", fieldParams: map[string]any{}}); err != nil {
+	if err := s.write(map[string]any{fieldMethod: "initialized", fieldParams: make(map[string]any)}); err != nil {
 		return err
 	}
 	id = s.nextID
@@ -467,7 +467,7 @@ func (c *turnCollector) appendDelta(delta string) {
 	if delta == "" {
 		return
 	}
-	c.deltas.WriteString(delta)
+	_, _ = c.deltas.WriteString(delta)
 	c.emit(contracts.BackendEvent{Kind: eventText, Detail: delta})
 }
 
@@ -549,20 +549,15 @@ func withAttachments(text string, paths []string) string {
 	if len(paths) == 0 {
 		return text
 	}
-	var b strings.Builder
-	b.WriteString(text)
-	if text != "" {
-		b.WriteString("\n\n")
-	}
+	lines := make([]string, len(paths))
 	for i, p := range paths {
-		if i > 0 {
-			b.WriteByte('\n')
-		}
-		b.WriteString("[Image jointe : ")
-		b.WriteString(p)
-		b.WriteByte(']')
+		lines[i] = "[Image jointe : " + p + "]"
 	}
-	return b.String()
+	attachments := strings.Join(lines, "\n")
+	if text == "" {
+		return attachments
+	}
+	return text + "\n\n" + attachments
 }
 
 func withContext(ctx, text string) string {

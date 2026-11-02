@@ -27,7 +27,7 @@ func TestStreamResponderResumeToken(t *testing.T) {
 	}
 }
 
-func TestStreamResponderIsResumeAware(t *testing.T) {
+func TestStreamResponderIsResumeAware(_ *testing.T) {
 	var _ contracts.ResumeAware = (*streamResponder)(nil)
 }
 

@@ -14,6 +14,8 @@ func codexEfforts() []string {
 	return []string{"low", "medium", "high", "xhigh", "max", "ultra"}
 }
 
+// Models lists the models the host can route to this backend: the native ones on the
+// machine's own subscription, and the gateway ones routed through the gateway.
 func Models() []contracts.ModelSpec {
 	return []contracts.ModelSpec{
 		{ID: modelGPT56Sol, Label: "GPT-5.6 Sol", Arg: modelGPT56Sol, Efforts: codexEfforts(), Route: contracts.RouteNative},

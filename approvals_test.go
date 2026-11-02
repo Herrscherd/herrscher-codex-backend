@@ -98,7 +98,7 @@ func TestApprovalSubjectCoversBothSpellings(t *testing.T) {
 			t.Fatalf("%s = (%+v, %v)", m, req, ok)
 		}
 	}
-	changes := map[string]any{"b.go": map[string]any{}, "a.go": map[string]any{}}
+	changes := map[string]any{"b.go": make(map[string]any), "a.go": make(map[string]any)}
 	for _, m := range []string{"item/fileChange/requestApproval", "applyPatchApproval"} {
 		req, ok := approvalSubject(m, map[string]any{"fileChanges": changes})
 		if !ok || req.tool != "Write" || req.subject != "a.go b.go" {
@@ -252,7 +252,7 @@ func TestAnswerApprovalReturnsRespondError(t *testing.T) {
 	}
 }
 
-func TestWriteWarningLogsFailedWrite(t *testing.T) {
+func TestWriteWarningLogsFailedWrite(_ *testing.T) {
 	writeWarning(failingWriter{}, "herrscher: a warning nobody reads\n")
 }
 
