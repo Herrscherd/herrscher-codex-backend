@@ -90,9 +90,6 @@ func mustBackend(t *testing.T, c Config) contracts.Backend {
 	return b
 }
 
-// TestRunCmdErrorIncludesStderr pins that a failing codex CLI surfaces its own
-// diagnostic. cmd.Output() only populates ExitError.Stderr when Stderr is nil,
-// and we set it (for the verbose passthrough), so it must be captured by hand.
 func TestRunCmdErrorIncludesStderr(t *testing.T) {
 	fake := filepath.Join(t.TempDir(), "codex")
 	script := "#!/bin/sh\necho 'codex: model not found' >&2\nexit 7\n"

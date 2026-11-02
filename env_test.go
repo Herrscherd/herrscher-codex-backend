@@ -12,16 +12,6 @@ import (
 	contracts "github.com/Herrscherd/herrscher-contracts"
 )
 
-// TestNativeSpawnInheritsAndInjectionReplaces exercises the two spawn-time
-// environment properties through a real child process, not through
-// contracts.MergeEnv directly: on the native route the child sees the daemon's
-// own environment, and on the gateway route an injected key REPLACES the
-// inherited entry. The child sees one entry with the injected value: dropping
-// the merge, or letting the inherited value win, would run the session on the
-// machine's own login while the system believes it injected a gateway
-// credential. Asserting through a real child rather than through
-// contracts.MergeEnv is the point: that is the code path a spawn actually
-// takes, and os/exec's own dedup (last entry wins) is part of it.
 func TestNativeSpawnInheritsAndInjectionReplaces(t *testing.T) {
 	const probeVar = "HERRSCHER_ENV_PROBE"
 	path := filepath.Join(t.TempDir(), "codex")
@@ -117,21 +107,6 @@ func waitForProbeFile(t *testing.T, path string) string {
 	return ""
 }
 
-// TestStreamSpawnAppliesInjectedEnv covers the app-server spawn site
-// (startAppSession in stream.go), which has no vendor binary to run in CI. If
-// the cmd.Env line there were ever dropped, a stream session would silently
-// run against the user's own codex login while the system believed it was
-// running on the paid gateway, a state the project's legal constraints
-// forbid, and argument threading alone cannot catch that.
-//
-// startAppSession execs argv[0] directly (no shell), with argv built as base
-// followed by appServerArgv's own flags. Passing base as ["sh", "-c", script]
-// makes sh read the script from -c and treat the appended app-server flags as
-// positional parameters ($0, $1, ...), which the script below never
-// references. Each script records what it sees of the probe variable to a
-// file and then execs `cat`, so the child blocks on stdin exactly like a real
-// codex app-server process would: startAppSession returns a live session,
-// not one that has already exited.
 func TestStreamSpawnAppliesInjectedEnv(t *testing.T) {
 	const probeVar = "NEUBLOX_STREAM_PROBE"
 

@@ -65,8 +65,6 @@ func TestAllowAsksTheDaemonAndReadsItsVerdict(t *testing.T) {
 	}
 }
 
-// The failure contract is absolute: nothing internal ever denies. A daemon that
-// cannot be reached, or an answer that cannot be read, allows.
 func TestAllowFailsOpen(t *testing.T) {
 	cases := map[string]func(context.Context, string, []string) ([]byte, error){
 		"the daemon could not be reached": func(context.Context, string, []string) ([]byte, error) {
@@ -112,8 +110,6 @@ func TestApprovalSubjectCoversBothSpellings(t *testing.T) {
 	}
 }
 
-// decline and never cancel: cancel would abort the whole turn over one refused
-// command, instead of letting the agent pick another way.
 func TestApprovalResponseDeclinesRatherThanCancelling(t *testing.T) {
 	deny := approvalResponse(7, false)
 	if deny["id"] != 7 {
@@ -127,8 +123,6 @@ func TestApprovalResponseDeclinesRatherThanCancelling(t *testing.T) {
 	}
 }
 
-// A request nobody recognises must still be answered: leaving a server request
-// without a response stalls the turn until its deadline.
 func TestAnswerApprovalAlwaysReplies(t *testing.T) {
 	var sent []map[string]any
 	respond := func(m map[string]any) error { sent = append(sent, m); return nil }
@@ -192,9 +186,6 @@ func TestDeclaresPerToolGating(t *testing.T) {
 	t.Fatal("codex backend did not self-register into contracts.Default")
 }
 
-// The dispatch inside the turn loop: a server request carries both an id and a
-// method, which is what tells it apart from a notification (method, no id) and
-// from a reply to one of our own requests (id, no method).
 func TestReadTurnAnswersAnApprovalRequestMidTurn(t *testing.T) {
 	lines := strings.Join([]string{
 		`{"id":9,"method":"item/commandExecution/requestApproval","params":{"command":"rm -rf /"}}`,
