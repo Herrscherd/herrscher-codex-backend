@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Herrscherd/herrscher-contracts"
+	contracts "github.com/Herrscherd/herrscher-contracts"
 )
 
 func TestGatewayConfigDeclaresResponsesWireAPI(t *testing.T) {

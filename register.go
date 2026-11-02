@@ -3,7 +3,7 @@ package codex
 import (
 	"context"
 
-	"github.com/Herrscherd/herrscher-contracts"
+	contracts "github.com/Herrscherd/herrscher-contracts"
 )
 
 func init() {

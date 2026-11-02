@@ -11,7 +11,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/Herrscherd/herrscher-contracts"
+	contracts "github.com/Herrscherd/herrscher-contracts"
 )
 
 // approver answers the approval requests codex sends over the app-server

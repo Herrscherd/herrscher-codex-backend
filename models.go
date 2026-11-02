@@ -1,6 +1,6 @@
 package codex
 
-import "github.com/Herrscherd/herrscher-contracts"
+import contracts "github.com/Herrscherd/herrscher-contracts"
 
 // efforts is the effort axis of the GPT-5.6 models. Earlier models have no
 // separate effort axis and declare an empty list.

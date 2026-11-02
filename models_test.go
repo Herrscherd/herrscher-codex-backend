@@ -3,7 +3,7 @@ package codex
 import (
 	"testing"
 
-	"github.com/Herrscherd/herrscher-contracts"
+	contracts "github.com/Herrscherd/herrscher-contracts"
 )
 
 func TestModelsAreValid(t *testing.T) {

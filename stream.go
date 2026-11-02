@@ -13,7 +13,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/Herrscherd/herrscher-contracts"
+	contracts "github.com/Herrscherd/herrscher-contracts"
 )
 
 type oneShotResponder struct {
@@ -136,6 +136,7 @@ func streamBase(fields []string) []string {
 	}
 	return fields
 }
+
 func appServerArgv(base []string, gated bool) []string {
 	argv := append([]string{}, base...)
 	argv = append(argv,
@@ -184,6 +185,7 @@ func newAppSession(stdin io.WriteCloser, out io.Reader) *appSession {
 func initializeRequest(id int) map[string]any {
 	return map[string]any{"id": id, "method": "initialize", "params": map[string]any{"clientInfo": map[string]any{"name": "herrscher_codex_backend", "title": "Herrscher Codex Backend", "version": "0.1.0"}}}
 }
+
 func threadStartRequest(id int, model, dir, resume string) map[string]any {
 	params := map[string]any{}
 	if model != "" {
@@ -197,6 +199,7 @@ func threadStartRequest(id int, model, dir, resume string) map[string]any {
 	}
 	return map[string]any{"id": id, "method": "thread/start", "params": params}
 }
+
 func turnStartRequest(id int, thread, text, model, effort string) map[string]any {
 	params := map[string]any{"threadId": thread, "input": []any{map[string]any{"type": "text", "text": text}}}
 	if model != "" {
@@ -217,6 +220,7 @@ func (s *appSession) write(msg map[string]any) error {
 	_, err = s.stdin.Write(b)
 	return err
 }
+
 func (s *appSession) waitResponse(id int) (map[string]any, error) {
 	for {
 		line, err := s.out.ReadBytes('\n')
@@ -233,6 +237,7 @@ func (s *appSession) waitResponse(id int) (map[string]any, error) {
 		}
 	}
 }
+
 func (s *appSession) initialize(resume string) error {
 	if err := s.write(initializeRequest(s.nextID)); err != nil {
 		return err
@@ -492,6 +497,7 @@ func withAttachments(text string, paths []string) string {
 	}
 	return b.String()
 }
+
 func withContext(ctx, text string) string {
 	if ctx == "" {
 		return text
