@@ -25,11 +25,11 @@ type approver struct {
 }
 
 func newApprover(look func(string) string) *approver {
-	session, _, bin, gated := contracts.ApprovalsFromEnv(look)
-	if !gated {
+	gate := contracts.ApprovalsFromEnv(look)
+	if !gate.Gated {
 		return nil
 	}
-	return &approver{session: session, bin: bin, ask: runApprove, warn: os.Stderr}
+	return &approver{session: gate.Session, bin: gate.Bin, ask: runApprove, warn: os.Stderr}
 }
 
 func runApprove(ctx context.Context, bin string, argv []string) ([]byte, error) {
