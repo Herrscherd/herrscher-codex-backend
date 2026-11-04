@@ -609,7 +609,7 @@ func TestRespondEndsOnTheCompletionOfItsResponseIdWithoutTurnStarted(t *testing.
 		if request[fieldMethod] != "turn/start" {
 			return nil
 		}
-		return []map[string]any{turnStartReply(request, "turn-1"), agentText("turn-1", "réponse"), turnEndedAs("turn-1", "completed", nil)}
+		return []map[string]any{turnStartReply(request), agentText("turn-1", "réponse"), turnEndedAs("turn-1", "completed", nil)}
 	})
 	got, err := respondWithin(t, compactingResponder(peer), "un")
 	if err != nil || got != "réponse" {
@@ -622,11 +622,57 @@ func TestRespondIgnoresACompletionOfAnotherIdAfterItsResponse(t *testing.T) {
 		if request[fieldMethod] != "turn/start" {
 			return nil
 		}
-		return []map[string]any{turnStartReply(request, "turn-1"), turnEndedAs("turn-2", "failed", nil), agentText("turn-1", "réponse"), turnEndedAs("turn-1", "completed", nil)}
+		return []map[string]any{turnStartReply(request), turnEndedAs("turn-2", "failed", nil), agentText("turn-1", "réponse"), turnEndedAs("turn-1", "completed", nil)}
 	})
 	got, err := respondWithin(t, compactingResponder(peer), "un")
 	if err != nil || got != "réponse" {
 		t.Fatalf("got %q, %v; want the answer of the turn named by its response", got, err)
+	}
+}
+
+func TestRespondTakesACompletionThatArrivesBeforeItsResponse(t *testing.T) {
+	peer := newCompactPeer(t, func(request map[string]any) []map[string]any {
+		if request[fieldMethod] != "turn/start" {
+			return nil
+		}
+		return []map[string]any{
+			agentText("turn-1", "réponse"),
+			turnEndedAs("turn-1", "completed", nil),
+			turnStartReply(request),
+		}
+	})
+	got, err := respondWithin(t, compactingResponder(peer), "un")
+	if err != nil || got != "réponse" {
+		t.Fatalf("got %q, %v; want the answer of turn-1 once its response names it", got, err)
+	}
+}
+
+func TestRespondFailsWhenItsResponseAndTurnStartedNameTwoIds(t *testing.T) {
+	orders := map[string]func(map[string]any) []map[string]any{
+		"response first": func(request map[string]any) []map[string]any {
+			return []map[string]any{turnStartReply(request), turnStartedNotice("turn-2")}
+		},
+		"turn/started first": func(request map[string]any) []map[string]any {
+			return []map[string]any{turnStartedNotice("turn-2"), turnStartReply(request)}
+		},
+	}
+	for name, reply := range orders {
+		t.Run(name, func(t *testing.T) {
+			peer := newCompactPeer(t, func(request map[string]any) []map[string]any {
+				if request[fieldMethod] != "turn/start" {
+					return nil
+				}
+				return reply(request)
+			})
+			r := compactingResponder(peer)
+			_, err := respondWithin(t, r, "un")
+			if !errors.Is(err, errTurnIDMismatch) || !strings.Contains(err.Error(), "turn-1") || !strings.Contains(err.Error(), "turn-2") {
+				t.Fatalf("err=%v, want errTurnIDMismatch naming turn-1 and turn-2 without waiting for the context", err)
+			}
+			if r.sess != nil {
+				t.Fatal("the session that named two ids for one turn was kept")
+			}
+		})
 	}
 }
 

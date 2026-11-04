@@ -99,8 +99,8 @@ func writeCompactMessage(out io.Writer, message map[string]any) bool {
 	return err == nil
 }
 
-func turnStartReply(request map[string]any, turnID string) map[string]any {
-	return map[string]any{fieldID: request[fieldID], fieldResult: map[string]any{fieldTurn: map[string]any{fieldID: turnID, fieldStatus: "inProgress", "items": []any{}}}}
+func turnStartReply(request map[string]any) map[string]any {
+	return map[string]any{fieldID: request[fieldID], fieldResult: map[string]any{fieldTurn: map[string]any{fieldID: "turn-1", fieldStatus: "inProgress", "items": []any{}}}}
 }
 
 func answerCompaction(notifications ...map[string]any) func(map[string]any) []map[string]any {
@@ -460,17 +460,60 @@ func TestManifestDeclaresTheCompactor(t *testing.T) {
 	}
 }
 
-func TestCompactEndsOnTheCompletionOfItsThreadWithoutTurnStarted(t *testing.T) {
+func compactionStarted(turnID string) map[string]any {
+	return notification(methodItemStart, map[string]any{fieldThreadID: "thread-1", fieldTurnID: turnID, fieldItem: map[string]any{"id": "c1", fieldType: itemContextCompaction}})
+}
+
+func TestCompactIgnoresTheCompletionOfAnotherTurnOfItsThread(t *testing.T) {
 	peer := newCompactPeer(t, func(request map[string]any) []map[string]any {
 		if request[fieldMethod] != methodCompactStart {
 			return nil
 		}
-		return []map[string]any{{fieldID: request[fieldID], fieldResult: make(map[string]any)}, completedTurn()}
+		return []map[string]any{{fieldID: request[fieldID], fieldResult: make(map[string]any)}, turnEndedAs("turn-0", "completed", nil)}
+	})
+	ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+	defer cancel()
+	_, err := compactingResponder(peer).Compact(ctx, contracts.CompactRequest{}, nil)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err=%v, want context.DeadlineExceeded: the compaction closed on the completion of another turn", err)
+	}
+}
+
+func TestCompactEndsOnTheCompletionOfItsOwnTurn(t *testing.T) {
+	peer := newCompactPeer(t, func(request map[string]any) []map[string]any {
+		if request[fieldMethod] != methodCompactStart {
+			return nil
+		}
+		return []map[string]any{
+			{fieldID: request[fieldID], fieldResult: make(map[string]any)},
+			turnEndedAs("turn-0", "completed", nil),
+			compactionStarted("turn-1"),
+			turnEndedAs("turn-1", "completed", nil),
+		}
 	})
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	if _, err := compactingResponder(peer).Compact(ctx, contracts.CompactRequest{}, nil); err != nil {
 		t.Fatalf("Compact: %v", err)
+	}
+}
+
+func TestCompactFailsWhenItsItemNamesAnotherTurnThanTurnStarted(t *testing.T) {
+	peer := newCompactPeer(t, func(request map[string]any) []map[string]any {
+		if request[fieldMethod] != methodCompactStart {
+			return nil
+		}
+		return []map[string]any{
+			{fieldID: request[fieldID], fieldResult: make(map[string]any)},
+			turnStartedNotice("turn-1"),
+			compactionStarted("turn-2"),
+		}
+	})
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	_, err := compactingResponder(peer).Compact(ctx, contracts.CompactRequest{}, nil)
+	if !errors.Is(err, errTurnIDMismatch) || !strings.Contains(err.Error(), "turn-1") || !strings.Contains(err.Error(), "turn-2") {
+		t.Fatalf("err=%v, want errTurnIDMismatch naming turn-1 and turn-2", err)
 	}
 }
 

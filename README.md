@@ -67,12 +67,22 @@ The method and its params come from the protocol schema of `codex-cli` 0.161.0
 read by the same turn reader as a turn. A turn's id comes from the response to
 `turn/start` (`TurnStartResponse.turn.id`, required by the schema), or from its
 `turn/started` notification, which the schema does not guarantee. The reader
-takes a `turn/completed` only when it closes that turn: a completion that names
-another turn, or that arrives before the turn id is known, is ignored, and so is
-any event of another thread. A compaction has no id in its response
-(`ThreadCompactStartResponse` is empty), so without a `turn/started` it closes on
-the first `turn/completed` of its thread. The turn lock makes that the
-compaction's own completion. An `error` notification with `willRetry` false is the failure,
+takes a `turn/completed` only when it closes the turn whose id it knows. A
+completion that names another turn is ignored. A completion that arrives before
+the id is known is kept in a queue of at most 16 entries and applied as soon as
+the id is learned. If the response to `turn/start` and a `turn/started` name two
+different ids for one turn, the turn fails at once with `errTurnIDMismatch`,
+which names both ids, and the session is dropped, because the server may still
+run the turn that was not announced.
+
+A compaction's response is empty (`ThreadCompactStartResponse`), so its id comes
+from the `turnId` of its `item/started` notification for a `contextCompaction`
+item (required by the schema), or from its `turn/started`. The turn lock does
+not identify the compaction: a completion of another turn of the thread closes
+the compaction only if it carries that id. A compaction whose id never arrives
+waits for the context of its caller or its ten-minute deadline.
+
+An `error` notification with `willRetry` false is the failure,
 and the reader still waits for the `turn/completed` that follows it, so that
 completion never leaks into the next turn. An `error` with `willRetry` true is
 ignored, because the server retries it. Its start, an `item/started` of a
