@@ -27,7 +27,7 @@ herrscher plugin add github.com/Herrscherd/herrscher-codex-backend
 | `CODEX_STREAM` | `true` | `false` selects the oneshot mode |
 | `CODEX_DIR` | | the working directory the CLI runs in |
 | `CODEX_KIND` | | `stream` or `oneshot`, the explicit form of `CODEX_STREAM` |
-| `CODEX_COMPACT_TIMEOUT` | `10m` | the deadline of one compaction, a Go duration such as `15m`; zero, a negative value or an unparseable value is refused. Without effect in oneshot mode (`CODEX_STREAM=false`), which has no compaction |
+| `CODEX_COMPACT_TIMEOUT` | `10m` | the deadline of one compaction, a Go duration such as `15m`; zero, a negative value or an unparseable value is refused. Stream mode only: in oneshot mode (`CODEX_STREAM=false`) the variable is validated but never used, see [Compaction](#compaction) |
 | `HERRSCHER_CODEX_ONESHOT_WINDOWS` | | set to `1` as a Windows escape hatch |
 
 There is one more setting, `env`, and it has no environment binding on purpose.
@@ -126,7 +126,11 @@ thread history that the reopened session resumes. The reader cannot remove them,
 so the next turn may read them as context. This limit is not verified against a
 live app-server.
 
-The `oneshot` mode has no session to compact, so it does not implement the port.
+The `oneshot` mode has no session to compact, so its instance does not implement the
+`Compact` port, although the manifest still declares `Capabilities.Compactor`. The host
+therefore attempts a compaction, the instance answers `no_compactor`, and the host
+refuses it: the first refusal logs one warning for the daemon, then each compaction is
+refused without a new warning. `CODEX_COMPACT_TIMEOUT` has no effect in that mode.
 
 ## Model catalog
 
