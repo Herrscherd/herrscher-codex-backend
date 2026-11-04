@@ -27,6 +27,7 @@ herrscher plugin add github.com/Herrscherd/herrscher-codex-backend
 | `CODEX_STREAM` | `true` | `false` selects the oneshot mode |
 | `CODEX_DIR` | | the working directory the CLI runs in |
 | `CODEX_KIND` | | `stream` or `oneshot`, the explicit form of `CODEX_STREAM` |
+| `CODEX_COMPACT_TIMEOUT` | `10m` | the deadline of one compaction, a Go duration such as `15m`; zero, a negative value or an unparseable value is refused |
 | `HERRSCHER_CODEX_ONESHOT_WINDOWS` | | set to `1` as a Windows escape hatch |
 
 There is one more setting, `env`, and it has no environment binding on purpose.
@@ -95,7 +96,8 @@ other item is silent.
 The reader stops only on the `turn/completed` of its turn or on the context of
 its caller. An `error` with `willRetry` false followed by no `turn/completed`
 leaves it waiting until that context ends: `Respond` has no deadline of its own,
-so the caller must cancel. `Compact` adds its own ten-minute deadline.
+so the caller must cancel. `Compact` adds its own deadline, ten minutes unless
+`CODEX_COMPACT_TIMEOUT` sets another Go duration.
 
 With no approver configured, a server request received during a compaction
 (an approval, or any unrecognised request) is accepted, as `Respond` accepts it.
@@ -114,7 +116,7 @@ compaction, so `TokensMeasured` stays false and the note says the size was not
 measured.
 
 A failed compaction is not sent again, unlike a turn: a compaction is never run
-twice. A compaction that is cancelled, times out after ten minutes, or loses the
+twice. A compaction that is cancelled, reaches its deadline, or loses the
 app-server drops the session, and the next compaction reopens the same thread.
 A compaction refused or failed by codex keeps the session.
 

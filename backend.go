@@ -10,20 +10,22 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"time"
 
 	contracts "github.com/Herrscherd/herrscher-contracts"
 )
 
 // Config configures a Codex backend.
 type Config struct {
-	Kind     string
-	Stream   bool
-	Cmd      string
-	Model    string
-	Effort   string
-	Dir      string
-	Verbose  bool
-	ResumeID string
+	Kind           string
+	Stream         bool
+	Cmd            string
+	Model          string
+	Effort         string
+	Dir            string
+	Verbose        bool
+	ResumeID       string
+	CompactTimeout time.Duration
 
 	// Env is injected into the child process's environment at every spawn. It
 	// carries gateway credentials and is NEVER persisted or logged: that is
@@ -118,7 +120,7 @@ func NewBackend(ctx context.Context, cfg Config) (contracts.Backend, error) {
 				gatewayHomeRemovedOnClose: gatewayHome,
 			}, nil
 		}
-		responder := &streamResponder{base: streamBase(spec.argv), model: cfg.Model, effort: cfg.Effort, dir: cfg.Dir, verbose: cfg.Verbose, resumeID: cfg.ResumeID, env: cfg.Env, gatewayHomeRemovedOnClose: gatewayHome, approvalsIfGated: approvals}
+		responder := &streamResponder{base: streamBase(spec.argv), model: cfg.Model, effort: cfg.Effort, dir: cfg.Dir, verbose: cfg.Verbose, resumeID: cfg.ResumeID, env: cfg.Env, gatewayHomeRemovedOnClose: gatewayHome, approvalsIfGated: approvals, compactTimeout: cfg.CompactTimeout}
 		responder.start = responder.launchedWithin(ctx)
 		return responder, nil
 	default:
