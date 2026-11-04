@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os/exec"
 	"strings"
 	"time"
@@ -96,21 +97,43 @@ func listAppServerModels(ctx context.Context, command string) ([]codexModel, err
 	waitErr := cmd.Wait()
 	switch {
 	case sessionErr != nil:
-		return nil, withStderr(sessionErr, stderr)
+		return nil, logAppServerFailure(sessionErr, stderr)
 	case closeErr != nil:
 		return nil, fmt.Errorf("close app-server stdin: %w", closeErr)
 	case waitErr != nil:
-		return nil, withStderr(fmt.Errorf("app-server exited: %w", waitErr), stderr)
+		return nil, logAppServerFailure(fmt.Errorf("app-server exited: %w", waitErr), stderr)
 	}
 	return models, nil
 }
 
-func withStderr(err error, stderr *boundedBuffer) error {
-	text := strings.TrimSpace(stderr.String())
-	if text == "" {
-		return err
+func logAppServerFailure(err error, stderr *boundedBuffer) error {
+	if text := loggableStderr(stderr.String()); text != "" {
+		slog.Warn("app-server failed", "error", err, "stderr", text)
 	}
-	return fmt.Errorf("%w (app-server stderr: %s)", err, text)
+	return err
+}
+
+func loggableStderr(text string) string {
+	var kept []string
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || looksLikeSecret(line) {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return strings.Join(kept, " | ")
+}
+
+func looksLikeSecret(line string) bool {
+	lower := strings.ToLower(line)
+	secretMarkers := []string{"token", "secret", "password", "passwd", "api_key", "apikey", "api-key", "authorization", "bearer", "credential", "cookie", "sk-"}
+	for _, marker := range secretMarkers {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func runModelList(in io.Writer, out *bufio.Reader) ([]codexModel, error) {

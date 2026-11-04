@@ -2,12 +2,13 @@ package codex
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
-	"fmt"
+	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -16,18 +17,39 @@ import (
 )
 
 const (
-	fakeAppServerEnv     = "HERRSCHER_FAKE_APP_SERVER"
-	fakeGrandchildPIDEnv = "HERRSCHER_FAKE_GRANDCHILD_PID"
+	fakeAppServerEnv  = "HERRSCHER_FAKE_APP_SERVER"
+	fakeHeartbeatEnv  = "HERRSCHER_FAKE_HEARTBEAT"
+	fakeModeEnv       = "HERRSCHER_FAKE_MODE"
+	heartbeatModeName = "heartbeat"
 )
 
-func processAlive(t *testing.T, pid int) bool {
-	t.Helper()
-	stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
-	if err != nil {
-		return false
+func TestMain(m *testing.M) {
+	if os.Getenv(fakeAppServerEnv) == "1" {
+		fakeAppServerMain()
+		os.Exit(0)
 	}
-	fields := strings.Fields(string(stat))
-	return len(fields) > 2 && fields[2] != "Z"
+	os.Exit(m.Run())
+}
+
+func fileSize(t *testing.T, path string) int64 {
+	t.Helper()
+	info, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return info.Size()
+}
+
+func captureLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	return &buf
 }
 
 func fakeCodexCommand(t *testing.T, mode string) string {
@@ -36,19 +58,9 @@ func fakeCodexCommand(t *testing.T, mode string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	script := filepath.Join(t.TempDir(), "codex")
-	prefix := ""
-	if mode == "grandchild" {
-		pidFile := filepath.Join(t.TempDir(), "grandchild.pid")
-		t.Setenv(fakeGrandchildPIDEnv, pidFile)
-		prefix = fmt.Sprintf("sleep 30 &\necho $! > '%s'\n", pidFile)
-	}
-	body := fmt.Sprintf("#!/bin/sh\n%sexec env %s=1 '%s' -test.run=TestFakeAppServer -- \"$@\"\n", prefix, fakeAppServerEnv, self)
-	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("HERRSCHER_FAKE_MODE", mode)
-	return script
+	t.Setenv(fakeAppServerEnv, "1")
+	t.Setenv(fakeModeEnv, mode)
+	return self
 }
 
 func envWith(command string) func(string) string {
@@ -120,8 +132,10 @@ func TestDiscoverRefusesOversizedFrame(t *testing.T) {
 }
 
 func TestDiscoverDeadlineKillsGrandchildHoldingStdout(t *testing.T) {
+	heartbeat := filepath.Join(t.TempDir(), "heartbeat")
+	t.Setenv(fakeHeartbeatEnv, heartbeat)
 	command := fakeCodexCommand(t, "grandchild")
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 	defer cancel()
 	started := time.Now()
 	_, err := discover(ctx, contracts.DiscoveryAccess{Getenv: envWith(command)})
@@ -129,37 +143,89 @@ func TestDiscoverDeadlineKillsGrandchildHoldingStdout(t *testing.T) {
 		t.Fatal("a hanging app-server listed models")
 	}
 	if elapsed := time.Since(started); elapsed > 5*time.Second {
-		t.Fatalf("discover took %v past its 300ms deadline", elapsed)
+		t.Fatalf("discover took %v past its 1.5s deadline", elapsed)
 	}
-	pidBytes, err := os.ReadFile(os.Getenv(fakeGrandchildPIDEnv))
-	if err != nil {
-		t.Fatal(err)
+	before := fileSize(t, heartbeat)
+	if before == 0 {
+		t.Fatal("grandchild never started")
 	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if processAlive(t, pid) {
-		t.Fatalf("grandchild %d still holds the app-server stdout after the deadline", pid)
+	time.Sleep(300 * time.Millisecond)
+	if after := fileSize(t, heartbeat); after != before {
+		t.Fatalf("grandchild still writing after the deadline: %d -> %d bytes", before, after)
 	}
 }
 
-func TestDiscoverErrorCarriesBoundedStderr(t *testing.T) {
+func TestDiscoverKeepsStderrOutOfErrorAndLogsIt(t *testing.T) {
+	logged := captureLog(t)
 	command := fakeCodexCommand(t, "flood")
 	_, err := discover(context.Background(), contracts.DiscoveryAccess{Getenv: envWith(command)})
-	if err == nil || !strings.Contains(err.Error(), "no session token") {
-		t.Fatalf("err = %v, want the app-server stderr in it", err)
+	if err == nil {
+		t.Fatal("a silent app-server listed models")
 	}
-	if len(err.Error()) > 4096 {
-		t.Fatalf("error carries %d bytes, stderr is not bounded", len(err.Error()))
+	if strings.Contains(err.Error(), "app-server boot") {
+		t.Fatalf("stderr reached the returned error: %v", err)
+	}
+	if !strings.Contains(logged.String(), "app-server boot") {
+		t.Fatalf("stderr not logged: %s", logged)
+	}
+	if logged.Len() > discoverStderrMax+1024 {
+		t.Fatalf("log carries %d bytes, stderr is not bounded", logged.Len())
 	}
 }
 
-func TestFakeAppServer(t *testing.T) {
-	if os.Getenv(fakeAppServerEnv) != "1" {
-		t.Skip("helper process only")
+func TestDiscoverLogsNoSecretLines(t *testing.T) {
+	logged := captureLog(t)
+	command := fakeCodexCommand(t, "leaky")
+	_, err := discover(context.Background(), contracts.DiscoveryAccess{Getenv: envWith(command)})
+	if err == nil {
+		t.Fatal("a silent app-server listed models")
 	}
-	serveFakeAppServer(os.Stdin, os.Stdout, os.Getenv("HERRSCHER_FAKE_MODE"))
+	text := logged.String()
+	if !strings.Contains(text, "app-server boot") {
+		t.Fatalf("benign stderr line not logged: %s", text)
+	}
+	for _, secret := range []string{"sk-live-123", "Bearer", "api_key", "session token"} {
+		if strings.Contains(text, secret) {
+			t.Fatalf("log carries %q: %s", secret, text)
+		}
+	}
+}
+
+func fakeAppServerMain() {
+	mode := os.Getenv(fakeModeEnv)
+	if mode == heartbeatModeName {
+		beat(os.Getenv(fakeHeartbeatEnv))
+	}
+	serveFakeAppServer(os.Stdin, os.Stdout, mode)
+}
+
+func beat(path string) {
+	for {
+		file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+		if err != nil {
+			panic(err)
+		}
+		if _, err := file.WriteString("beat\n"); err != nil {
+			panic(err)
+		}
+		if err := file.Close(); err != nil {
+			panic(err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func startHeartbeatChild() {
+	self, err := os.Executable()
+	if err != nil {
+		panic(err)
+	}
+	child := exec.CommandContext(context.Background(), self)
+	child.Env = append(os.Environ(), fakeAppServerEnv+"=1", fakeModeEnv+"="+heartbeatModeName)
+	child.Stdout = os.Stdout
+	if err := child.Start(); err != nil {
+		panic(err)
+	}
 }
 
 func reply(out *os.File, line string) {
@@ -169,8 +235,14 @@ func reply(out *os.File, line string) {
 }
 
 func serveFakeAppServer(in, out *os.File, mode string) {
-	if mode == "flood" {
-		if _, err := os.Stderr.WriteString("no session token" + strings.Repeat("x", 100000)); err != nil {
+	switch mode {
+	case "flood":
+		if _, err := os.Stderr.WriteString("app-server boot\n" + strings.Repeat("x", 100000)); err != nil {
+			panic(err)
+		}
+		return
+	case "leaky":
+		if _, err := os.Stderr.WriteString("app-server boot\nAuthorization: Bearer sk-live-123\napi_key=sk-xyz\nsession token=abc\n"); err != nil {
 			panic(err)
 		}
 		return
@@ -182,6 +254,9 @@ func serveFakeAppServer(in, out *os.File, mode string) {
 		case strings.Contains(line, `"method":"initialize"`):
 			reply(out, `{"id":0,"result":{"userAgent":"fake"}}`)
 		case strings.Contains(line, `"method":"model/list"`):
+			if mode == "grandchild" {
+				startHeartbeatChild()
+			}
 			if mode == "hang" || mode == "grandchild" {
 				time.Sleep(time.Hour)
 			}

@@ -19,3 +19,14 @@ jobs:
           cache: true
       - name: Quality chain of the go-book
         run: scripts/check.sh
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Model discovery and process tree on Windows
+        run: go test -race -run 'TestDiscover' .
