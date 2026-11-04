@@ -9,6 +9,7 @@ import (
 	"io"
 	"os/exec"
 	"strings"
+	"time"
 
 	contracts "github.com/Herrscherd/herrscher-contracts"
 )
@@ -19,11 +20,15 @@ const (
 	discoverMaxPages     = 20
 	discoverInitializeID = 0
 	discoverModelListID  = 1
+	discoverFrameMax     = 4 << 20
+	discoverStderrMax    = 2048
+	discoverWaitDelay    = 2 * time.Second
 )
 
 var (
 	errCodexRPC       = errors.New("codex app-server refused the request")
 	errModelListPages = errors.New("model/list paginates past the page limit")
+	errFrameTooLarge  = errors.New("app-server frame exceeds the size limit")
 )
 
 type rpcFrame struct {
@@ -66,6 +71,10 @@ func discover(ctx context.Context, access contracts.DiscoveryAccess) ([]contract
 
 func listAppServerModels(ctx context.Context, command string) ([]codexModel, error) {
 	cmd := exec.CommandContext(ctx, command, "app-server", "--listen", "stdio://")
+	configureChild(cmd)
+	cmd.WaitDelay = discoverWaitDelay
+	stderr := &boundedBuffer{limit: discoverStderrMax}
+	cmd.Stderr = stderr
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, fmt.Errorf("open app-server stdin: %w", err)
@@ -78,17 +87,30 @@ func listAppServerModels(ctx context.Context, command string) ([]codexModel, err
 		return nil, fmt.Errorf("start app-server: %w", err)
 	}
 	models, sessionErr := runModelList(stdin, bufio.NewReader(stdout))
+	if sessionErr != nil {
+		if killErr := killProcessTree(cmd); killErr != nil {
+			sessionErr = errors.Join(sessionErr, killErr)
+		}
+	}
 	closeErr := stdin.Close()
 	waitErr := cmd.Wait()
 	switch {
 	case sessionErr != nil:
-		return nil, sessionErr
+		return nil, withStderr(sessionErr, stderr)
 	case closeErr != nil:
 		return nil, fmt.Errorf("close app-server stdin: %w", closeErr)
 	case waitErr != nil:
-		return nil, fmt.Errorf("app-server exited: %w", waitErr)
+		return nil, withStderr(fmt.Errorf("app-server exited: %w", waitErr), stderr)
 	}
 	return models, nil
+}
+
+func withStderr(err error, stderr *boundedBuffer) error {
+	text := strings.TrimSpace(stderr.String())
+	if text == "" {
+		return err
+	}
+	return fmt.Errorf("%w (app-server stderr: %s)", err, text)
 }
 
 func runModelList(in io.Writer, out *bufio.Reader) ([]codexModel, error) {
@@ -199,7 +221,7 @@ func (s *rpcSession) write(frame map[string]any) error {
 }
 
 func (s *rpcSession) readFrame() (rpcFrame, error) {
-	line, err := s.out.ReadBytes('\n')
+	line, err := readBoundedLine(s.out, discoverFrameMax)
 	if err != nil && (!errors.Is(err, io.EOF) || len(line) == 0) {
 		return rpcFrame{}, fmt.Errorf("read app-server: %w", err)
 	}
@@ -208,4 +230,19 @@ func (s *rpcSession) readFrame() (rpcFrame, error) {
 		return rpcFrame{}, fmt.Errorf("decode app-server frame: %w", decodeErr)
 	}
 	return frame, nil
+}
+
+func readBoundedLine(reader *bufio.Reader, limit int) ([]byte, error) {
+	var line []byte
+	for {
+		chunk, err := reader.ReadSlice('\n')
+		if len(line)+len(chunk) > limit {
+			return nil, errFrameTooLarge
+		}
+		line = append(line, chunk...)
+		if errors.Is(err, bufio.ErrBufferFull) {
+			continue
+		}
+		return line, err
+	}
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -14,7 +15,20 @@ import (
 	contracts "github.com/Herrscherd/herrscher-contracts"
 )
 
-const fakeAppServerEnv = "HERRSCHER_FAKE_APP_SERVER"
+const (
+	fakeAppServerEnv     = "HERRSCHER_FAKE_APP_SERVER"
+	fakeGrandchildPIDEnv = "HERRSCHER_FAKE_GRANDCHILD_PID"
+)
+
+func processAlive(t *testing.T, pid int) bool {
+	t.Helper()
+	stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return false
+	}
+	fields := strings.Fields(string(stat))
+	return len(fields) > 2 && fields[2] != "Z"
+}
 
 func fakeCodexCommand(t *testing.T, mode string) string {
 	t.Helper()
@@ -23,7 +37,13 @@ func fakeCodexCommand(t *testing.T, mode string) string {
 		t.Fatal(err)
 	}
 	script := filepath.Join(t.TempDir(), "codex")
-	body := fmt.Sprintf("#!/bin/sh\nexec env %s=1 '%s' -test.run=TestFakeAppServer -- \"$@\"\n", fakeAppServerEnv, self)
+	prefix := ""
+	if mode == "grandchild" {
+		pidFile := filepath.Join(t.TempDir(), "grandchild.pid")
+		t.Setenv(fakeGrandchildPIDEnv, pidFile)
+		prefix = fmt.Sprintf("sleep 30 &\necho $! > '%s'\n", pidFile)
+	}
+	body := fmt.Sprintf("#!/bin/sh\n%sexec env %s=1 '%s' -test.run=TestFakeAppServer -- \"$@\"\n", prefix, fakeAppServerEnv, self)
 	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -89,6 +109,52 @@ func TestDiscoverStopsWhenDeadlinePasses(t *testing.T) {
 	}
 }
 
+func TestDiscoverRefusesOversizedFrame(t *testing.T) {
+	command := fakeCodexCommand(t, "giant")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err := discover(ctx, contracts.DiscoveryAccess{Getenv: envWith(command)})
+	if !errors.Is(err, errFrameTooLarge) {
+		t.Fatalf("err = %v, want errFrameTooLarge", err)
+	}
+}
+
+func TestDiscoverDeadlineKillsGrandchildHoldingStdout(t *testing.T) {
+	command := fakeCodexCommand(t, "grandchild")
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	_, err := discover(ctx, contracts.DiscoveryAccess{Getenv: envWith(command)})
+	if err == nil {
+		t.Fatal("a hanging app-server listed models")
+	}
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		t.Fatalf("discover took %v past its 300ms deadline", elapsed)
+	}
+	pidBytes, err := os.ReadFile(os.Getenv(fakeGrandchildPIDEnv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if processAlive(t, pid) {
+		t.Fatalf("grandchild %d still holds the app-server stdout after the deadline", pid)
+	}
+}
+
+func TestDiscoverErrorCarriesBoundedStderr(t *testing.T) {
+	command := fakeCodexCommand(t, "flood")
+	_, err := discover(context.Background(), contracts.DiscoveryAccess{Getenv: envWith(command)})
+	if err == nil || !strings.Contains(err.Error(), "no session token") {
+		t.Fatalf("err = %v, want the app-server stderr in it", err)
+	}
+	if len(err.Error()) > discoverStderrMax+512 {
+		t.Fatalf("error carries %d bytes, stderr is not bounded", len(err.Error()))
+	}
+}
+
 func TestFakeAppServer(t *testing.T) {
 	if os.Getenv(fakeAppServerEnv) != "1" {
 		t.Skip("helper process only")
@@ -103,6 +169,12 @@ func reply(out *os.File, line string) {
 }
 
 func serveFakeAppServer(in, out *os.File, mode string) {
+	if mode == "flood" {
+		if _, err := os.Stderr.WriteString("no session token" + strings.Repeat("x", 100000)); err != nil {
+			panic(err)
+		}
+		return
+	}
 	scanner := bufio.NewScanner(in)
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -110,7 +182,7 @@ func serveFakeAppServer(in, out *os.File, mode string) {
 		case strings.Contains(line, `"method":"initialize"`):
 			reply(out, `{"id":0,"result":{"userAgent":"fake"}}`)
 		case strings.Contains(line, `"method":"model/list"`):
-			if mode == "hang" {
+			if mode == "hang" || mode == "grandchild" {
 				time.Sleep(time.Hour)
 			}
 			answerModelList(out, mode, line)
@@ -119,6 +191,10 @@ func serveFakeAppServer(in, out *os.File, mode string) {
 }
 
 func answerModelList(out *os.File, mode, request string) {
+	if mode == "giant" {
+		reply(out, strings.Repeat("x", discoverFrameMax+1))
+		return
+	}
 	if mode == "rpcerror" {
 		reply(out, `{"id":1,"error":{"code":-32000,"message":"no login"}}`)
 		return
