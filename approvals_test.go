@@ -222,7 +222,8 @@ func TestDeclaresPerToolGating(t *testing.T) {
 
 func TestReadTurnAnswersAnApprovalRequestMidTurn(t *testing.T) {
 	lines := `{"id":9,"method":"item/commandExecution/requestApproval","params":{"command":"rm -rf /"}}
-{"method":"turn/completed","params":{"threadId":"t1"}}
+{"method":"turn/started","params":{"threadId":"t1","turn":{"id":"turn-1"}}}
+{"method":"turn/completed","params":{"threadId":"t1","turn":{"id":"turn-1"}}}
 `
 	var sent []map[string]any
 	a := &approver{session: "api", ask: func(context.Context, string, []string) ([]byte, error) {

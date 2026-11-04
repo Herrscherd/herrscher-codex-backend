@@ -69,7 +69,7 @@ func writeCompactMessage(out io.Writer, message map[string]any) bool {
 
 func answerCompaction(notifications ...map[string]any) func(map[string]any) []map[string]any {
 	return func(request map[string]any) []map[string]any {
-		messages := []map[string]any{{"id": request["id"], "result": make(map[string]any)}}
+		messages := []map[string]any{{"id": request["id"], "result": make(map[string]any)}, turnStartedNotice("turn-1")}
 		return append(messages, notifications...)
 	}
 }
@@ -83,11 +83,19 @@ func completedTurn() map[string]any {
 }
 
 func turnEnded(status string, turnError map[string]any) map[string]any {
-	turn := map[string]any{"id": "turn-1", "status": status}
+	return turnEndedAs("turn-1", status, turnError)
+}
+
+func turnEndedAs(turnID, status string, turnError map[string]any) map[string]any {
+	turn := map[string]any{fieldID: turnID, fieldStatus: status}
 	if turnError != nil {
 		turn[fieldError] = turnError
 	}
-	return notification("turn/completed", map[string]any{fieldThreadID: "thread-1", fieldTurn: turn})
+	return notification(methodTurnEnd, map[string]any{fieldThreadID: "thread-1", fieldTurn: turn})
+}
+
+func turnStartedNotice(turnID string) map[string]any {
+	return notification(methodTurnStart, map[string]any{fieldThreadID: "thread-1", fieldTurn: map[string]any{fieldID: turnID}})
 }
 
 func errorNotice(willRetry bool, message string) map[string]any {
@@ -218,6 +226,20 @@ func TestCompactReportsItsStartAsAToolEventOnly(t *testing.T) {
 	}
 }
 
+func TestCompactEmitsNoToolEventForAnotherItem(t *testing.T) {
+	message := notification("item/started", map[string]any{fieldThreadID: "thread-1", fieldTurnID: "turn-1", fieldItem: map[string]any{"id": "m1", fieldType: "agentMessage"}})
+	peer := newCompactPeer(t, answerCompaction(message, completedTurn()))
+	var events []contracts.BackendEvent
+	if _, err := compactingResponder(peer).Compact(t.Context(), contracts.CompactRequest{}, func(e contracts.BackendEvent) {
+		events = append(events, e)
+	}); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("events=%+v, want none for an agent message", events)
+	}
+}
+
 func TestCompactRunsWithoutAnEventSink(t *testing.T) {
 	started := notification("item/started", map[string]any{fieldThreadID: "thread-1", fieldTurnID: "turn-1", fieldItem: map[string]any{"id": "c1", fieldType: itemContextCompaction}})
 	peer := newCompactPeer(t, answerCompaction(started, completedTurn()))
@@ -264,7 +286,6 @@ func TestCompactIgnoresAnErrorThatWillRetry(t *testing.T) {
 
 func TestCompactIgnoresEventsOfOtherTurnsAndThreads(t *testing.T) {
 	peer := newCompactPeer(t, answerCompaction(
-		notification("turn/started", map[string]any{fieldThreadID: "thread-1", fieldTurn: map[string]any{fieldID: "turn-1"}}),
 		notification("item/started", map[string]any{fieldThreadID: "thread-2", fieldTurnID: "turn-1", fieldItem: map[string]any{fieldType: itemContextCompaction}}),
 		notification("turn/completed", map[string]any{fieldThreadID: "thread-1", fieldTurn: map[string]any{fieldID: "turn-0", fieldStatus: "failed"}}),
 		notification("turn/completed", map[string]any{fieldThreadID: "thread-2", fieldTurn: map[string]any{fieldID: "turn-1", fieldStatus: "failed"}}),
@@ -288,7 +309,7 @@ func TestCompactAnswersAServerRequestMidCompaction(t *testing.T) {
 	approval := map[string]any{fieldID: float64(900), fieldMethod: "item/unknown/requestApproval", fieldParams: map[string]any{fieldThreadID: "thread-1"}}
 	peer := newCompactPeer(t, func(request map[string]any) []map[string]any {
 		if request[fieldMethod] == methodCompactStart {
-			return []map[string]any{approval}
+			return []map[string]any{turnStartedNotice("turn-1"), approval}
 		}
 		if request[fieldID] == float64(900) {
 			return []map[string]any{completedTurn()}
@@ -375,6 +396,12 @@ func TestCompactFailsWhenTheServerHangsUp(t *testing.T) {
 	_, err := compactingResponder(peer).Compact(t.Context(), contracts.CompactRequest{}, nil)
 	if !errors.Is(err, io.EOF) {
 		t.Fatalf("err=%v, want the end of the stream (io.EOF)", err)
+	}
+}
+
+func TestCompactTimeoutIsTenMinutes(t *testing.T) {
+	if compactTimeout != 10*time.Minute {
+		t.Fatalf("compactTimeout=%v, want 10m", compactTimeout)
 	}
 }
 

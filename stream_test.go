@@ -93,7 +93,7 @@ func TestReadTurnMapsCodexEvents(t *testing.T) {
 		`{"method":"item/agentMessage/delta","params":{"delta":"hello"}}`,
 		`{"method":"item/started","params":{"item":{"type":"command_execution","command":"go test ./..."}}}`,
 		`{"method":"item/completed","params":{"item":{"type":"agent_message","text":"hello world"}}}`,
-		`{"method":"turn/completed","params":{"turn":{"status":"completed"}}}`,
+		`{"method":"turn/started","params":{"turn":{"id":"turn-1"}}}` + "\n" + `{"method":"turn/completed","params":{"turn":{"id":"turn-1","status":"completed"}}}`,
 	}, "\n") + "\n"
 	var got []contracts.BackendEvent
 	tr, err := readTurn(context.Background(), bufio.NewReader(strings.NewReader(lines)), turnScope{}, func(e contracts.BackendEvent) { got = append(got, e) }, nil, nil)
@@ -109,7 +109,7 @@ func TestReadTurnMapsCodexCamelCaseItems(t *testing.T) {
 	lines := strings.Join([]string{
 		`{"method":"item/started","params":{"item":{"type":"commandExecution","command":"go test ./..."}}}`,
 		`{"method":"item/completed","params":{"item":{"type":"agentMessage","text":"response without delta"}}}`,
-		`{"method":"turn/completed","params":{"turn":{"status":"completed"}}}`,
+		`{"method":"turn/started","params":{"turn":{"id":"turn-1"}}}` + "\n" + `{"method":"turn/completed","params":{"turn":{"id":"turn-1","status":"completed"}}}`,
 	}, "\n") + "\n"
 	var got []contracts.BackendEvent
 	tr, err := readTurn(context.Background(), bufio.NewReader(strings.NewReader(lines)), turnScope{}, func(e contracts.BackendEvent) { got = append(got, e) }, nil, nil)
@@ -124,7 +124,7 @@ func TestReadTurnMapsCodexCamelCaseItems(t *testing.T) {
 func TestReadTurnHandlesHugeLine(t *testing.T) {
 	huge := strings.Repeat("x", 200_000)
 	input := `{"method":"item/agentMessage/delta","params":{"delta":"` + huge + `"}}` + "\n" +
-		`{"method":"turn/completed","params":{"turn":{"status":"completed"}}}` + "\n"
+		`{"method":"turn/started","params":{"turn":{"id":"turn-1"}}}` + "\n" + `{"method":"turn/completed","params":{"turn":{"id":"turn-1","status":"completed"}}}` + "\n"
 	if _, err := readTurn(context.Background(), bufio.NewReader(strings.NewReader(input)), turnScope{}, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -352,7 +352,7 @@ func replyOnce(in io.Reader, out *io.PipeWriter, thread string) error {
 	if _, err := bufio.NewReader(in).ReadBytes('\n'); err != nil {
 		return out.Close()
 	}
-	_, err := io.WriteString(out, `{"method":"item/agentMessage/delta","params":{"threadId":"`+thread+`","delta":"ok"}}`+"\n"+`{"method":"turn/completed","params":{"threadId":"`+thread+`","turn":{"status":"completed"}}}`+"\n")
+	_, err := io.WriteString(out, `{"method":"item/agentMessage/delta","params":{"threadId":"`+thread+`","delta":"ok"}}`+"\n"+`{"method":"turn/started","params":{"threadId":"`+thread+`","turn":{"id":"turn-1"}}}`+"\n"+`{"method":"turn/completed","params":{"threadId":"`+thread+`","turn":{"id":"turn-1","status":"completed"}}}`+"\n")
 	return errors.Join(err, out.Close())
 }
 
@@ -422,7 +422,7 @@ func serveTurns(in io.Reader, out *io.PipeWriter) error {
 			return out.Close()
 		}
 		reply := `{"method":"item/agentMessage/delta","params":{"threadId":"thread-1","delta":"ok"}}` + "\n" +
-			`{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"status":"completed"}}}` + "\n"
+			`{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1"}}}` + "\n" + `{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed"}}}` + "\n"
 		if _, err := io.WriteString(out, reply); err != nil {
 			return errors.Join(err, out.Close())
 		}
@@ -535,6 +535,26 @@ func agentText(turnID, text string) map[string]any {
 	return notification("item/completed", map[string]any{fieldThreadID: "thread-1", fieldTurnID: turnID, fieldItem: map[string]any{fieldType: "agentMessage", fieldText: text}})
 }
 
+func respondWithin(t *testing.T, r *streamResponder, content string) (string, error) {
+	t.Helper()
+	type answer struct {
+		text string
+		err  error
+	}
+	done := make(chan answer, 1)
+	go func() {
+		text, err := r.Respond(context.Background(), contracts.Prompt{Content: content}, nil)
+		done <- answer{text: text, err: err}
+	}()
+	select {
+	case got := <-done:
+		return got.text, got.err
+	case <-time.After(5 * time.Second):
+		t.Fatalf("Respond(%q) did not return", content)
+		return "", nil
+	}
+}
+
 func TestRespondReadsTheTurnToItsEndAfterAnErrorNotice(t *testing.T) {
 	turns := 0
 	peer := newCompactPeer(t, func(request map[string]any) []map[string]any {
@@ -543,15 +563,15 @@ func TestRespondReadsTheTurnToItsEndAfterAnErrorNotice(t *testing.T) {
 		}
 		turns++
 		if turns == 1 {
-			return []map[string]any{errorNotice(false, "boom"), turnEnded("failed", nil)}
+			return []map[string]any{turnStartedNotice("turn-1"), errorNotice(false, "boom"), turnEndedAs("turn-1", "failed", nil)}
 		}
-		return []map[string]any{agentText("turn-1", "deux"), completedTurn()}
+		return []map[string]any{turnStartedNotice("turn-2"), agentText("turn-2", "deux"), turnEndedAs("turn-2", "completed", nil)}
 	})
 	r := &streamResponder{sess: peer.session}
-	if _, err := r.Respond(t.Context(), contracts.Prompt{Content: "un"}, nil); !errors.Is(err, errTurnFailed) {
+	if _, err := respondWithin(t, r, "un"); !errors.Is(err, errTurnFailed) {
 		t.Fatalf("first turn err=%v, want errTurnFailed", err)
 	}
-	got, err := r.Respond(t.Context(), contracts.Prompt{Content: "deux"}, nil)
+	got, err := respondWithin(t, r, "deux")
 	if err != nil || got != "deux" {
 		t.Fatalf("second turn got %q, %v; want its own answer", got, err)
 	}
@@ -563,15 +583,35 @@ func TestRespondIgnoresACompletionOfAnotherTurn(t *testing.T) {
 			return nil
 		}
 		return []map[string]any{
-			notification("turn/started", map[string]any{fieldThreadID: "thread-1", fieldTurn: map[string]any{fieldID: "turn-2"}}),
-			notification("turn/completed", map[string]any{fieldThreadID: "thread-1", fieldTurn: map[string]any{fieldID: "turn-1", fieldStatus: "failed"}}),
+			turnStartedNotice("turn-2"),
+			turnEndedAs("turn-1", "failed", nil),
 			agentText("turn-2", "réponse"),
-			notification("turn/completed", map[string]any{fieldThreadID: "thread-1", fieldTurn: map[string]any{fieldID: "turn-2", fieldStatus: "completed"}}),
+			agentText("turn-1", "intrus"),
+			turnEndedAs("turn-2", "completed", nil),
 		}
 	})
 	r := &streamResponder{sess: peer.session}
-	got, err := r.Respond(t.Context(), contracts.Prompt{Content: "un"}, nil)
+	got, err := respondWithin(t, r, "un")
 	if err != nil || got != "réponse" {
 		t.Fatalf("got %q, %v; want the answer of its own turn", got, err)
+	}
+}
+
+func TestRespondIgnoresACompletionBeforeItsTurnStarts(t *testing.T) {
+	peer := newCompactPeer(t, func(request map[string]any) []map[string]any {
+		if request[fieldMethod] != "turn/start" {
+			return nil
+		}
+		return []map[string]any{
+			turnEndedAs("turn-0", "completed", nil),
+			turnStartedNotice("turn-1"),
+			agentText("turn-1", "réponse"),
+			turnEndedAs("turn-1", "completed", nil),
+		}
+	})
+	r := &streamResponder{sess: peer.session}
+	got, err := respondWithin(t, r, "un")
+	if err != nil || got != "réponse" {
+		t.Fatalf("got %q, %v; want the answer of the turn that was started", got, err)
 	}
 }

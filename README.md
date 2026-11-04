@@ -64,13 +64,23 @@ turn lock as `Respond`, so it never runs alongside a turn.
 
 The method and its params come from the protocol schema of `codex-cli` 0.161.0
 (`ThreadCompactStartParams`, whose only field is `threadId`). The compaction is
-read by the same turn reader as a turn: it ends on the `turn/completed` of its
-own turn. An `error` notification with `willRetry` false is the failure, and the
-reader still waits for the `turn/completed` that follows it, so that completion
-never leaks into the next turn. An `error` with `willRetry` true is ignored,
-because the server retries it. Events of another thread or another turn are
-ignored. Its start, an `item/started` of a `contextCompaction` item, is reported
-as a `tool` event named `compaction`.
+read by the same turn reader as a turn. That reader takes a `turn/completed` only
+when it closes the turn it saw start: a completion that arrives before its
+`turn/started`, or that names another turn, is ignored, and so is any event of
+another thread. An `error` notification with `willRetry` false is the failure,
+and the reader still waits for the `turn/completed` that follows it, so that
+completion never leaks into the next turn. An `error` with `willRetry` true is
+ignored, because the server retries it. Its start, an `item/started` of a
+`contextCompaction` item, is reported as a `tool` event named `compaction`; any
+other item is silent.
+
+The reader stops only on the `turn/completed` of its turn or on the context of
+its caller. An `error` with `willRetry` false followed by no `turn/completed`
+leaves it waiting until that context ends: `Respond` has no deadline of its own,
+so the caller must cancel. `Compact` adds its own ten-minute deadline.
+
+With no approver configured, a server request received during a compaction
+(an approval, or any unrecognised request) is accepted, as `Respond` accepts it.
 
 A free instruction is refused, not dropped, and the decision is final for this
 backend: `thread/compact/start` has no field for an instruction, so codex cannot

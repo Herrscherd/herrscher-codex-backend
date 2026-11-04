@@ -226,7 +226,7 @@ func threadStartRequest(requestID int, model, dir, resume string) map[string]any
 }
 
 func turnStartRequest(requestID int, thread, text, model, effort string) map[string]any {
-	params := map[string]any{fieldThreadID: thread, "input": []any{map[string]any{"type": contentText, fieldText: text}}}
+	params := map[string]any{fieldThreadID: thread, fieldInput: []any{map[string]any{fieldType: contentText, fieldText: text}}}
 	if model != "" {
 		params["model"] = model
 	}
@@ -426,7 +426,7 @@ func (c *turnCollector) consumeLine(ctx context.Context, line []byte, approvals 
 	if isServerRequest(msg) {
 		return turnResult{}, false, answerApproval(ctx, msg, msg[fieldID], approvals, respondHoldingSendLock)
 	}
-	if !c.belongs(mapField(msg, fieldParams)) {
+	if !c.belongs(stringField(msg, fieldMethod), mapField(msg, fieldParams)) {
 		return turnResult{}, false, nil
 	}
 	c.handleAppEvent(msg)
@@ -441,9 +441,12 @@ func isServerRequest(msg map[string]any) bool {
 	return hasID && msg[fieldMethod] != nil
 }
 
-func (c *turnCollector) belongs(params map[string]any) bool {
+func (c *turnCollector) belongs(method string, params map[string]any) bool {
 	if c.scope.threadID != "" && stringField(params, fieldThreadID) != c.scope.threadID {
 		return false
+	}
+	if method == methodTurnEnd {
+		return c.turnID != "" && turnIDOf(params) == c.turnID
 	}
 	return c.turnID == "" || turnIDOf(params) == c.turnID
 }
@@ -534,8 +537,8 @@ func (c *turnCollector) observeItem(item map[string]any) {
 			c.result.Text = v
 		}
 	case "commandExecution", "command_execution":
-		if cmd := stringField(item, "command"); cmd != "" {
-			c.emit(contracts.BackendEvent{Kind: "tool", Tool: "command", Detail: cmd})
+		if cmd := stringField(item, fieldCommand); cmd != "" {
+			c.emit(contracts.BackendEvent{Kind: "tool", Tool: toolCommand, Detail: cmd})
 		}
 	}
 }
