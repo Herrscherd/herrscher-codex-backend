@@ -39,3 +39,19 @@ func TestManifestPublishesModels(t *testing.T) {
 		t.Fatal("codex backend did not self-register")
 	}
 }
+
+func TestListedCodexModelsAreNativeWithTheirOwnArg(t *testing.T) {
+	want := map[string]bool{"gpt-6-luna": true, "gpt-5.6-terra": true, "gpt-5.6-luna": true}
+	for _, m := range Models() {
+		if !want[m.ID] {
+			continue
+		}
+		if m.Route != contracts.RouteNative || m.Arg != m.ID {
+			t.Errorf("model %q: route %q arg %q, want native with arg %q", m.ID, m.Route, m.Arg, m.ID)
+		}
+		delete(want, m.ID)
+	}
+	for id := range want {
+		t.Errorf("model %q missing from the catalog", id)
+	}
+}
