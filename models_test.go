@@ -40,18 +40,50 @@ func TestManifestPublishesModels(t *testing.T) {
 	}
 }
 
-func TestListedCodexModelsAreNativeWithTheirOwnArg(t *testing.T) {
-	want := map[string]bool{"gpt-6-luna": true, "gpt-5.6-terra": true, "gpt-5.6-luna": true}
-	for _, m := range Models() {
-		if !want[m.ID] {
+func TestRetiredModelsStayListedForResume(t *testing.T) {
+	retired := []string{"gpt-5.6-sol", "gpt-5-codex", "gpt-5.5", "o4-mini"}
+	for _, id := range retired {
+		spec, ok := findModel(id)
+		if !ok {
+			t.Errorf("retired model %q dropped from the catalog: a resumed session could not find it", id)
 			continue
 		}
-		if m.Route != contracts.RouteNative || m.Arg != m.ID {
-			t.Errorf("model %q: route %q arg %q, want native with arg %q", m.ID, m.Route, m.Arg, m.ID)
+		if spec.Route != contracts.RouteNative || spec.Arg != id {
+			t.Errorf("retired model %q: route %q arg %q, want native with arg %q", id, spec.Route, spec.Arg, id)
 		}
-		delete(want, m.ID)
 	}
-	for id := range want {
-		t.Errorf("model %q missing from the catalog", id)
+}
+
+func TestGPT6LunaAndTerraAndLunaAreNativeWithTheirOwnArg(t *testing.T) {
+	for _, id := range []string{"gpt-6-luna", "gpt-5.6-terra", "gpt-5.6-luna"} {
+		spec, ok := findModel(id)
+		if !ok {
+			t.Errorf("model %q missing from the catalog", id)
+			continue
+		}
+		if spec.Route != contracts.RouteNative || spec.Arg != id {
+			t.Errorf("model %q: route %q arg %q, want native with arg %q", id, spec.Route, spec.Arg, id)
+		}
 	}
+}
+
+func TestGPT6LunaHasNoUltraEffort(t *testing.T) {
+	spec, ok := findModel("gpt-6-luna")
+	if !ok {
+		t.Fatal("gpt-6-luna missing from the catalog")
+	}
+	for _, effort := range spec.Efforts {
+		if effort == "ultra" {
+			t.Fatalf("gpt-6-luna offers effort ultra: %v", spec.Efforts)
+		}
+	}
+}
+
+func findModel(id string) (contracts.ModelSpec, bool) {
+	for _, spec := range Models() {
+		if spec.ID == id {
+			return spec, true
+		}
+	}
+	return contracts.ModelSpec{}, false
 }

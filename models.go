@@ -15,18 +15,18 @@ func codexEfforts() []string {
 	return []string{"low", "medium", "high", "xhigh", "max", "ultra"}
 }
 
-func codexEffortsUpToMax() []string {
-	return codexEfforts()[:5]
+func codexEffortsWithoutUltra() []string {
+	return []string{"low", "medium", "high", "xhigh", "max"}
 }
 
 // Models lists the models the host can route to this backend: the native ones on the
 // machine's own subscription, and the gateway ones routed through the gateway.
 func Models() []contracts.ModelSpec {
 	return []contracts.ModelSpec{
-		{ID: modelGPT6Luna, Label: "GPT-6 Luna", Arg: modelGPT6Luna, Efforts: codexEffortsUpToMax(), Route: contracts.RouteNative},
+		{ID: modelGPT6Luna, Label: "GPT-6 Luna", Arg: modelGPT6Luna, Efforts: codexEffortsWithoutUltra(), Route: contracts.RouteNative},
 		{ID: modelGPT56Sol, Label: "GPT-5.6 Sol (ancien)", Arg: modelGPT56Sol, Efforts: codexEfforts(), Route: contracts.RouteNative},
 		{ID: modelGPT56Terra, Label: "GPT-5.6 Terra", Arg: modelGPT56Terra, Efforts: codexEfforts(), Route: contracts.RouteNative},
-		{ID: modelGPT56Luna, Label: "GPT-5.6 Luna", Arg: modelGPT56Luna, Efforts: codexEffortsUpToMax(), Route: contracts.RouteNative},
+		{ID: modelGPT56Luna, Label: "GPT-5.6 Luna", Arg: modelGPT56Luna, Efforts: codexEffortsWithoutUltra(), Route: contracts.RouteNative},
 		{ID: "gpt-5-codex", Label: "GPT-5 Codex (ancien)", Arg: "gpt-5-codex", Route: contracts.RouteNative},
 		{ID: modelGPT55, Label: "GPT-5.5 (ancien)", Arg: modelGPT55, Route: contracts.RouteNative},
 		{ID: modelO4Mini, Label: "o4-mini (ancien)", Arg: modelO4Mini, Route: contracts.RouteNative},
