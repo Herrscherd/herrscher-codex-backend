@@ -55,6 +55,31 @@ Both modes run headless: `approval_policy="never"`,
 turn parameter instead, because the Codex CLI rejects those flags before
 `app-server`.
 
+## Compaction
+
+The stream mode implements `contracts.Compactor`, and its manifest declares
+`Capabilities.Compactor`. `Compact` sends the app-server method
+`thread/compact/start` with the thread id of the session, and it holds the same
+turn lock as `Respond`, so it never runs alongside a turn.
+
+The method and its params come from the protocol schema of `codex-cli` 0.161.0
+(`ThreadCompactStartParams`, whose only field is `threadId`). The compaction
+ends on `turn/completed`, on `turn/failed`, or on an `error` notification whose
+`willRetry` is false. Its start, an `item/started` of a `contextCompaction` item,
+is reported as a `tool` event named `compaction`.
+
+A free instruction is refused, not dropped. `thread/compact/start` has no field
+for one, so a non-blank `CompactRequest.Instruction` returns an error before
+anything is sent to the app-server.
+
+The result never claims a size. `thread/tokenUsage/updated` reports the usage of
+the last turn and the running total, not the size of the context after the
+compaction, so `TokensMeasured` stays false and the note says the size was not
+measured. A failed compaction is not sent again, unlike a turn: a compaction is
+never run twice.
+
+The `oneshot` mode has no session to compact, so it does not implement the port.
+
 ## Model catalog
 
 `Models` (`models.go`) is published through `Manifest.Models`, so the host can

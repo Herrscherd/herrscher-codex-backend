@@ -219,13 +219,13 @@ func threadStartRequest(requestID int, model, dir, resume string) map[string]any
 		params["cwd"] = dir
 	}
 	if resume != "" {
-		return map[string]any{"id": requestID, fieldMethod: "thread/resume", fieldParams: map[string]any{"threadId": resume}}
+		return map[string]any{"id": requestID, fieldMethod: "thread/resume", fieldParams: map[string]any{fieldThreadID: resume}}
 	}
 	return map[string]any{"id": requestID, fieldMethod: "thread/start", fieldParams: params}
 }
 
 func turnStartRequest(requestID int, thread, text, model, effort string) map[string]any {
-	params := map[string]any{"threadId": thread, "input": []any{map[string]any{"type": contentText, fieldText: text}}}
+	params := map[string]any{fieldThreadID: thread, "input": []any{map[string]any{"type": contentText, fieldText: text}}}
 	if model != "" {
 		params["model"] = model
 	}
@@ -408,7 +408,7 @@ func (c *turnCollector) consumeLine(ctx context.Context, line []byte, approvals 
 		return turnResult{}, false, nil
 	}
 	c.observed = true
-	if rpcErr, ok := msg["error"].(map[string]any); ok {
+	if rpcErr, ok := msg[fieldError].(map[string]any); ok {
 		return c.reject(rpcErr), true, nil
 	}
 	if isServerRequest(msg) {
@@ -464,7 +464,7 @@ func (c *turnCollector) handleAppEvent(msg map[string]any) {
 		c.observeItem(mapField(params, "item"))
 	case "turn/completed":
 		c.complete(mapField(params, "turn"))
-	case "turn/failed", "error":
+	case "turn/failed", methodError:
 		c.fail(method, stringField(params, "message"))
 	}
 }
@@ -492,8 +492,8 @@ func (c *turnCollector) observeItem(item map[string]any) {
 
 func (c *turnCollector) complete(turn map[string]any) {
 	status := stringField(turn, "status")
-	c.result.IsError = status == "failed" || status == "error"
-	c.result.ErrMsg = stringField(turn, "error")
+	c.result.IsError = status == "failed" || status == statusError
+	c.result.ErrMsg = stringField(turn, fieldError)
 	c.emit(contracts.BackendEvent{Kind: eventResult, IsError: c.result.IsError})
 	c.result.completed = true
 }
