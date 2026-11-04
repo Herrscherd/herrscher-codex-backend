@@ -27,7 +27,7 @@ herrscher plugin add github.com/Herrscherd/herrscher-codex-backend
 | `CODEX_STREAM` | `true` | `false` selects the oneshot mode |
 | `CODEX_DIR` | | the working directory the CLI runs in |
 | `CODEX_KIND` | | `stream` or `oneshot`, the explicit form of `CODEX_STREAM` |
-| `CODEX_COMPACT_TIMEOUT` | `10m` | the deadline of one compaction, a Go duration such as `15m`; zero, a negative value or an unparseable value is refused |
+| `CODEX_COMPACT_TIMEOUT` | `10m` | the deadline of one compaction, a Go duration such as `15m`; zero, a negative value or an unparseable value is refused. Without effect in oneshot mode (`CODEX_STREAM=false`), which has no compaction |
 | `HERRSCHER_CODEX_ONESHOT_WINDOWS` | | set to `1` as a Windows escape hatch |
 
 There is one more setting, `env`, and it has no environment binding on purpose.

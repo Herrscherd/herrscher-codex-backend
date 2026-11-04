@@ -490,13 +490,39 @@ func TestParseCompactTimeout(t *testing.T) {
 	}
 }
 
-func TestFactoryRefusesAnInvalidCompactTimeoutNamingTheVariable(t *testing.T) {
-	_, err := backendPlugin(t).Backend(context.Background(), contracts.PluginConfig{Settings: map[string]string{
-		"kind":           "stream",
-		"compactTimeout": "soon",
-	}})
-	if err == nil || !strings.Contains(err.Error(), "CODEX_COMPACT_TIMEOUT") {
-		t.Fatalf("factory error = %v, want a refusal naming CODEX_COMPACT_TIMEOUT", err)
+func resolveCodexSettings(t *testing.T, env map[string]string) contracts.PluginConfig {
+	t.Helper()
+	cfg, err := contracts.Resolve(backendPlugin(t).Manifest.Config, func(name string) string { return env[name] })
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	return cfg
+}
+
+func TestCompactTimeoutFromTheEnvironmentReachesTheResponder(t *testing.T) {
+	plugin := backendPlugin(t)
+	cfg := resolveCodexSettings(t, map[string]string{"CODEX_COMPACT_TIMEOUT": "15m"})
+	b, err := plugin.Backend(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("factory: %v", err)
+	}
+	responder, ok := b.(*streamResponder)
+	if !ok {
+		t.Fatalf("factory returned %T, want the stream responder", b)
+	}
+	if responder.compactTimeout != 15*time.Minute {
+		t.Fatalf("compactTimeout = %v, want 15m from CODEX_COMPACT_TIMEOUT", responder.compactTimeout)
+	}
+}
+
+func TestFactoryRefusesAnInvalidCompactTimeoutFromTheEnvironment(t *testing.T) {
+	plugin := backendPlugin(t)
+	for _, raw := range []string{"soon", "0", "-5m"} {
+		cfg := resolveCodexSettings(t, map[string]string{"CODEX_COMPACT_TIMEOUT": raw})
+		_, err := plugin.Backend(context.Background(), cfg)
+		if err == nil || !strings.Contains(err.Error(), "CODEX_COMPACT_TIMEOUT") {
+			t.Fatalf("CODEX_COMPACT_TIMEOUT=%q: factory error = %v, want a refusal naming CODEX_COMPACT_TIMEOUT", raw, err)
+		}
 	}
 }
 
