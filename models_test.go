@@ -1,6 +1,7 @@
 package codex
 
 import (
+	"slices"
 	"testing"
 
 	contracts "github.com/Herrscherd/herrscher-contracts"
@@ -38,4 +39,54 @@ func TestManifestPublishesModels(t *testing.T) {
 	if !found {
 		t.Fatal("codex backend did not self-register")
 	}
+}
+
+func TestRetiredModelsStayListedForResume(t *testing.T) {
+	retired := []string{"gpt-5.6-sol", "gpt-5-codex", "gpt-5.5", "o4-mini"}
+	for _, id := range retired {
+		spec, ok := findModel(id)
+		if !ok {
+			t.Errorf("retired model %q dropped from the catalog: a resumed session could not find it", id)
+			continue
+		}
+		if spec.Route != contracts.RouteNative || spec.Arg != id {
+			t.Errorf("retired model %q: route %q arg %q, want native with arg %q", id, spec.Route, spec.Arg, id)
+		}
+	}
+}
+
+func TestListedCodexModelsAreNativeWithTheirOwnArg(t *testing.T) {
+	for _, id := range []string{"gpt-6-luna", "gpt-5.6-terra", "gpt-5.6-luna"} {
+		spec, ok := findModel(id)
+		if !ok {
+			t.Errorf("model %q missing from the catalog", id)
+			continue
+		}
+		if spec.Route != contracts.RouteNative || spec.Arg != id {
+			t.Errorf("model %q: route %q arg %q, want native with arg %q", id, spec.Route, spec.Arg, id)
+		}
+	}
+}
+
+func TestGPT6LunaFamilyEffortsAreExact(t *testing.T) {
+	want := []string{"low", "medium", "high", "xhigh", "max"}
+	for _, id := range []string{"gpt-6-luna", "gpt-5.6-luna"} {
+		spec, ok := findModel(id)
+		if !ok {
+			t.Errorf("model %q missing from the catalog", id)
+			continue
+		}
+		if !slices.Equal(spec.Efforts, want) {
+			t.Errorf("model %q efforts = %v, want exactly %v", id, spec.Efforts, want)
+		}
+	}
+}
+
+func findModel(id string) (contracts.ModelSpec, bool) {
+	for _, spec := range Models() {
+		if spec.ID == id {
+			return spec, true
+		}
+	}
+	return contracts.ModelSpec{}, false
 }
