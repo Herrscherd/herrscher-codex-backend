@@ -491,6 +491,27 @@ func TestCompactEndsOnTheCompletionOfItsOwnTurn(t *testing.T) {
 	}
 }
 
+func TestCompactFailsWhenSeventeenForeignCompletionsEndBeforeItsItem(t *testing.T) {
+	peer := newCompactPeer(t, func(request map[string]any) []map[string]any {
+		if request[fieldMethod] != methodCompactStart {
+			return nil
+		}
+		messages := []map[string]any{{fieldID: request[fieldID], fieldResult: make(map[string]any)}}
+		messages = append(messages, earlyCompletions(17)...)
+		return append(messages, compactionStarted("turn-1"))
+	})
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	r := compactingResponder(peer)
+	_, err := r.Compact(ctx, contracts.CompactRequest{}, nil)
+	if !errors.Is(err, errParkedFull) || !strings.Contains(err.Error(), "turn-18") {
+		t.Fatalf("err=%v, want errParkedFull naming turn-18 without waiting for the context", err)
+	}
+	if r.sess != nil {
+		t.Fatal("the session that dropped an unnamed completion was kept")
+	}
+}
+
 func TestCompactFailsWhenItsItemNamesAnotherTurnThanTurnStarted(t *testing.T) {
 	peer := newCompactPeer(t, func(request map[string]any) []map[string]any {
 		if request[fieldMethod] != methodCompactStart {
