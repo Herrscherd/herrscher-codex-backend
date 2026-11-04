@@ -1,6 +1,7 @@
 package codex
 
 import (
+	"slices"
 	"testing"
 
 	contracts "github.com/Herrscherd/herrscher-contracts"
@@ -54,7 +55,7 @@ func TestRetiredModelsStayListedForResume(t *testing.T) {
 	}
 }
 
-func TestGPT6LunaAndTerraAndLunaAreNativeWithTheirOwnArg(t *testing.T) {
+func TestListedCodexModelsAreNativeWithTheirOwnArg(t *testing.T) {
 	for _, id := range []string{"gpt-6-luna", "gpt-5.6-terra", "gpt-5.6-luna"} {
 		spec, ok := findModel(id)
 		if !ok {
@@ -67,14 +68,16 @@ func TestGPT6LunaAndTerraAndLunaAreNativeWithTheirOwnArg(t *testing.T) {
 	}
 }
 
-func TestGPT6LunaHasNoUltraEffort(t *testing.T) {
-	spec, ok := findModel("gpt-6-luna")
-	if !ok {
-		t.Fatal("gpt-6-luna missing from the catalog")
-	}
-	for _, effort := range spec.Efforts {
-		if effort == "ultra" {
-			t.Fatalf("gpt-6-luna offers effort ultra: %v", spec.Efforts)
+func TestGPT6LunaFamilyEffortsAreExact(t *testing.T) {
+	want := []string{"low", "medium", "high", "xhigh", "max"}
+	for _, id := range []string{"gpt-6-luna", "gpt-5.6-luna"} {
+		spec, ok := findModel(id)
+		if !ok {
+			t.Errorf("model %q missing from the catalog", id)
+			continue
+		}
+		if !slices.Equal(spec.Efforts, want) {
+			t.Errorf("model %q efforts = %v, want exactly %v", id, spec.Efforts, want)
 		}
 	}
 }
