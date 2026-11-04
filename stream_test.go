@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os/exec"
 	"strings"
@@ -673,6 +674,49 @@ func TestRespondFailsWhenItsResponseAndTurnStartedNameTwoIds(t *testing.T) {
 				t.Fatal("the session that named two ids for one turn was kept")
 			}
 		})
+	}
+}
+
+func earlyCompletions(count int) []map[string]any {
+	completions := make([]map[string]any, 0, count)
+	for i := 2; i < 2+count; i++ {
+		completions = append(completions, turnEndedAs(fmt.Sprintf("turn-%d", i), "completed", nil))
+	}
+	return completions
+}
+
+func TestRespondAcceptsSixteenCompletionsBeforeItsResponse(t *testing.T) {
+	peer := newCompactPeer(t, func(request map[string]any) []map[string]any {
+		if request[fieldMethod] != "turn/start" {
+			return nil
+		}
+		messages := []map[string]any{turnEndedAs("turn-1", "completed", nil)}
+		messages = append(messages, earlyCompletions(15)...)
+		messages = append(messages, agentText("turn-1", "réponse"), turnStartReply(request))
+		return messages
+	})
+	got, err := respondWithin(t, compactingResponder(peer), "un")
+	if err != nil || got != "réponse" {
+		t.Fatalf("got %q, %v; want turn-1 answered once its response names it", got, err)
+	}
+}
+
+func TestRespondFailsWhenSeventeenCompletionsEndBeforeItsResponse(t *testing.T) {
+	peer := newCompactPeer(t, func(request map[string]any) []map[string]any {
+		if request[fieldMethod] != "turn/start" {
+			return nil
+		}
+		messages := []map[string]any{turnEndedAs("turn-1", "completed", nil)}
+		messages = append(messages, earlyCompletions(16)...)
+		return append(messages, turnStartReply(request))
+	})
+	r := compactingResponder(peer)
+	_, err := respondWithin(t, r, "un")
+	if !errors.Is(err, errParkedFull) || !strings.Contains(err.Error(), "turn-17") {
+		t.Fatalf("err=%v, want errParkedFull naming turn-17 without waiting for the context", err)
+	}
+	if r.sess != nil {
+		t.Fatal("the session that dropped an unnamed completion was kept")
 	}
 }
 

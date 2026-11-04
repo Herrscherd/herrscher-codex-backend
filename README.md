@@ -70,7 +70,10 @@ read by the same turn reader as a turn. A turn's id comes from the response to
 takes a `turn/completed` only when it closes the turn whose id it knows. A
 completion that names another turn is ignored. A completion that arrives before
 the id is known is kept in a queue of at most 16 entries and applied as soon as
-the id is learned. If the response to `turn/start` and a `turn/started` name two
+the id is learned. A seventeenth completion that arrives before the id is known
+does not displace the others: the turn fails at once with `errParkedFull`, which
+names the turn that overflowed, and the session is dropped. No completion is
+discarded silently. If the response to `turn/start` and a `turn/started` name two
 different ids for one turn, the turn fails at once with `errTurnIDMismatch`,
 which names both ids, and the session is dropped, because the server may still
 run the turn that was not announced.
@@ -114,6 +117,12 @@ A failed compaction is not sent again, unlike a turn: a compaction is never run
 twice. A compaction that is cancelled, times out after ten minutes, or loses the
 app-server drops the session, and the next compaction reopens the same thread.
 A compaction refused or failed by codex keeps the session.
+
+When a turn or a compaction is abandoned, the thread is reopened through
+`resumeID`, and the items that the abandoned turn already produced stay in the
+thread history that the reopened session resumes. The reader cannot remove them,
+so the next turn may read them as context. This limit is not verified against a
+live app-server.
 
 The `oneshot` mode has no session to compact, so it does not implement the port.
 

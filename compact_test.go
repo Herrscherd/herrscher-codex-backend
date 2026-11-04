@@ -436,21 +436,14 @@ func TestCompactFailsWhenTheServerHangsUp(t *testing.T) {
 }
 
 func TestCompactTimeoutIsTenMinutes(t *testing.T) {
-	if compactTimeout != 10*time.Minute {
-		t.Fatalf("compactTimeout=%v, want 10m", compactTimeout)
-	}
-}
-
-func TestCompactDeadlineIsTenMinutes(t *testing.T) {
 	ctx, cancel := compactDeadline(t.Context())
 	defer cancel()
 	deadline, ok := ctx.Deadline()
 	if !ok {
 		t.Fatal("the compaction has no deadline")
 	}
-	remaining := time.Until(deadline)
-	if remaining > compactTimeout || remaining < compactTimeout-time.Minute {
-		t.Fatalf("deadline in %v, want about %v", remaining, compactTimeout)
+	if remaining := time.Until(deadline); remaining > 10*time.Minute || remaining < 10*time.Minute-time.Minute {
+		t.Fatalf("deadline in %v, want 10m", remaining)
 	}
 }
 

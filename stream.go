@@ -53,6 +53,8 @@ var errTurnNotStarted = errors.New("codex: app-server closed before any turn out
 
 var errTurnIDMismatch = errors.New("codex named two ids for one turn")
 
+var errParkedFull = errors.New("codex ended more turns than it could hold before naming the turn of its response")
+
 var (
 	errTurnFailed = errors.New("codex turn failed")
 	errNoThreadID = errors.New("codex app-server returned no thread id")
@@ -64,8 +66,8 @@ func (r *streamResponder) rememberToken(threadID string) {
 	r.token = threadID
 }
 
-func (r *streamResponder) abandonOnMismatch(err error) error {
-	if errors.Is(err, errTurnIDMismatch) {
+func (r *streamResponder) abandonUnsettled(err error) error {
+	if errors.Is(err, errTurnIDMismatch) || errors.Is(err, errParkedFull) {
 		r.dropSession()
 	}
 	return err
@@ -83,10 +85,10 @@ func (r *streamResponder) Respond(ctx context.Context, prompt contracts.Prompt, 
 	result, err := r.sess.Send(ctx, content, onEvent)
 	if err != nil {
 		if !restartable(err) {
-			return "", turnError(r.abandonOnMismatch(err))
+			return "", turnError(r.abandonUnsettled(err))
 		}
 		if result, err = r.reopen(ctx, content, onEvent); err != nil {
-			return "", r.abandonOnMismatch(err)
+			return "", r.abandonUnsettled(err)
 		}
 	}
 	if result.IsError {
@@ -478,8 +480,7 @@ func (c *turnCollector) handleNotification(msg map[string]any) error {
 	case methodTurnStart:
 		return c.learnTurnID(stringField(mapField(params, fieldTurn), fieldID))
 	case methodTurnEnd:
-		c.observeCompletion(mapField(params, fieldTurn))
-		return nil
+		return c.observeCompletion(mapField(params, fieldTurn))
 	case methodItemStart:
 		if c.scope.compaction && isContextCompactionItem(mapField(params, fieldItem)) {
 			if err := c.learnTurnID(turnIDOf(params)); err != nil {
@@ -508,21 +509,22 @@ func (c *turnCollector) learnTurnID(turnID string) error {
 	return nil
 }
 
-func (c *turnCollector) observeCompletion(turn map[string]any) {
+func (c *turnCollector) observeCompletion(turn map[string]any) error {
 	if c.turnID == "" {
-		c.park(turn)
-		return
+		return c.park(turn)
 	}
 	if stringField(turn, fieldID) == c.turnID {
 		c.complete(turn)
 	}
+	return nil
 }
 
-func (c *turnCollector) park(turn map[string]any) {
+func (c *turnCollector) park(turn map[string]any) error {
 	if len(c.parked) == maxParkedCompletions {
-		c.parked = c.parked[1:]
+		return fmt.Errorf("%w (queue of %d): turn %q ended before its id was known", errParkedFull, maxParkedCompletions, stringField(turn, fieldID))
 	}
 	c.parked = append(c.parked, turn)
+	return nil
 }
 
 func (c *turnCollector) releaseParked() {
