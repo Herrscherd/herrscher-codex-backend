@@ -64,10 +64,15 @@ turn lock as `Respond`, so it never runs alongside a turn.
 
 The method and its params come from the protocol schema of `codex-cli` 0.161.0
 (`ThreadCompactStartParams`, whose only field is `threadId`). The compaction is
-read by the same turn reader as a turn. That reader takes a `turn/completed` only
-when it closes the turn it saw start: a completion that arrives before its
-`turn/started`, or that names another turn, is ignored, and so is any event of
-another thread. An `error` notification with `willRetry` false is the failure,
+read by the same turn reader as a turn. A turn's id comes from the response to
+`turn/start` (`TurnStartResponse.turn.id`, required by the schema), or from its
+`turn/started` notification, which the schema does not guarantee. The reader
+takes a `turn/completed` only when it closes that turn: a completion that names
+another turn, or that arrives before the turn id is known, is ignored, and so is
+any event of another thread. A compaction has no id in its response
+(`ThreadCompactStartResponse` is empty), so without a `turn/started` it closes on
+the first `turn/completed` of its thread. The turn lock makes that the
+compaction's own completion. An `error` notification with `willRetry` false is the failure,
 and the reader still waits for the `turn/completed` that follows it, so that
 completion never leaks into the next turn. An `error` with `willRetry` true is
 ignored, because the server retries it. Its start, an `item/started` of a

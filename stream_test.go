@@ -537,22 +537,9 @@ func agentText(turnID, text string) map[string]any {
 
 func respondWithin(t *testing.T, r *streamResponder, content string) (string, error) {
 	t.Helper()
-	type answer struct {
-		text string
-		err  error
-	}
-	done := make(chan answer, 1)
-	go func() {
-		text, err := r.Respond(context.Background(), contracts.Prompt{Content: content}, nil)
-		done <- answer{text: text, err: err}
-	}()
-	select {
-	case got := <-done:
-		return got.text, got.err
-	case <-time.After(5 * time.Second):
-		t.Fatalf("Respond(%q) did not return", content)
-		return "", nil
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return r.Respond(ctx, contracts.Prompt{Content: content}, nil)
 }
 
 func TestRespondReadsTheTurnToItsEndAfterAnErrorNotice(t *testing.T) {
@@ -567,10 +554,11 @@ func TestRespondReadsTheTurnToItsEndAfterAnErrorNotice(t *testing.T) {
 		}
 		return []map[string]any{turnStartedNotice("turn-2"), agentText("turn-2", "deux"), turnEndedAs("turn-2", "completed", nil)}
 	})
-	r := &streamResponder{sess: peer.session}
+	r := compactingResponder(peer)
 	if _, err := respondWithin(t, r, "un"); !errors.Is(err, errTurnFailed) {
 		t.Fatalf("first turn err=%v, want errTurnFailed", err)
 	}
+	peer.requireWritten(t, "turn/completed")
 	got, err := respondWithin(t, r, "deux")
 	if err != nil || got != "deux" {
 		t.Fatalf("second turn got %q, %v; want its own answer", got, err)
@@ -590,7 +578,7 @@ func TestRespondIgnoresACompletionOfAnotherTurn(t *testing.T) {
 			turnEndedAs("turn-2", "completed", nil),
 		}
 	})
-	r := &streamResponder{sess: peer.session}
+	r := compactingResponder(peer)
 	got, err := respondWithin(t, r, "un")
 	if err != nil || got != "réponse" {
 		t.Fatalf("got %q, %v; want the answer of its own turn", got, err)
@@ -609,9 +597,48 @@ func TestRespondIgnoresACompletionBeforeItsTurnStarts(t *testing.T) {
 			turnEndedAs("turn-1", "completed", nil),
 		}
 	})
-	r := &streamResponder{sess: peer.session}
+	r := compactingResponder(peer)
 	got, err := respondWithin(t, r, "un")
 	if err != nil || got != "réponse" {
 		t.Fatalf("got %q, %v; want the answer of the turn that was started", got, err)
+	}
+}
+
+func TestRespondEndsOnTheCompletionOfItsResponseIdWithoutTurnStarted(t *testing.T) {
+	peer := newCompactPeer(t, func(request map[string]any) []map[string]any {
+		if request[fieldMethod] != "turn/start" {
+			return nil
+		}
+		return []map[string]any{turnStartReply(request, "turn-1"), agentText("turn-1", "réponse"), turnEndedAs("turn-1", "completed", nil)}
+	})
+	got, err := respondWithin(t, compactingResponder(peer), "un")
+	if err != nil || got != "réponse" {
+		t.Fatalf("got %q, %v; want the answer of the turn named by its response", got, err)
+	}
+}
+
+func TestRespondIgnoresACompletionOfAnotherIdAfterItsResponse(t *testing.T) {
+	peer := newCompactPeer(t, func(request map[string]any) []map[string]any {
+		if request[fieldMethod] != "turn/start" {
+			return nil
+		}
+		return []map[string]any{turnStartReply(request, "turn-1"), turnEndedAs("turn-2", "failed", nil), agentText("turn-1", "réponse"), turnEndedAs("turn-1", "completed", nil)}
+	})
+	got, err := respondWithin(t, compactingResponder(peer), "un")
+	if err != nil || got != "réponse" {
+		t.Fatalf("got %q, %v; want the answer of the turn named by its response", got, err)
+	}
+}
+
+func TestRespondReturnsItsTextWithoutAnEventSink(t *testing.T) {
+	peer := newCompactPeer(t, func(request map[string]any) []map[string]any {
+		if request[fieldMethod] != "turn/start" {
+			return nil
+		}
+		return []map[string]any{turnStartedNotice("turn-1"), agentText("turn-1", "texte"), turnEndedAs("turn-1", "completed", nil)}
+	})
+	got, err := respondWithin(t, compactingResponder(peer), "un")
+	if err != nil || got != "texte" {
+		t.Fatalf("got %q, %v; want the text without a sink", got, err)
 	}
 }

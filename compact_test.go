@@ -16,20 +16,52 @@ import (
 type compactPeer struct {
 	session  *appSession
 	requests chan map[string]any
+	written  chan string
 	hangUp   func()
+}
+
+func (p compactPeer) requireWritten(t *testing.T, marker string) {
+	t.Helper()
+	timeout := time.After(time.Second)
+	for {
+		select {
+		case line := <-p.written:
+			if strings.Contains(line, marker) {
+				return
+			}
+		case <-timeout:
+			t.Fatalf("no %s was read by the client before the turn returned", marker)
+		}
+	}
+}
+
+type signalingWriter struct {
+	out     io.Writer
+	written chan<- string
+}
+
+func (w signalingWriter) Write(p []byte) (int, error) {
+	n, err := w.out.Write(p)
+	select {
+	case w.written <- string(p):
+	default:
+	}
+	return n, err
 }
 
 func newCompactPeer(t *testing.T, reply func(request map[string]any) []map[string]any) compactPeer {
 	t.Helper()
 	inR, inW := io.Pipe()
 	outR, outW := io.Pipe()
+	written := make(chan string, 64)
 	peer := compactPeer{
 		session:  newAppSession(inW, outR),
 		requests: make(chan map[string]any, 8),
+		written:  written,
 		hangUp:   func() { closeChecked(t, outW) },
 	}
 	peer.session.threadID = "thread-1"
-	go serveCompactRequests(inR, outW, peer.requests, reply)
+	go serveCompactRequests(inR, signalingWriter{out: outW, written: written}, peer.requests, reply)
 	t.Cleanup(func() {
 		closeChecked(t, inR)
 		closeChecked(t, inW)
@@ -65,6 +97,10 @@ func writeCompactMessage(out io.Writer, message map[string]any) bool {
 	}
 	_, err = out.Write(append(payload, '\n'))
 	return err == nil
+}
+
+func turnStartReply(request map[string]any, turnID string) map[string]any {
+	return map[string]any{fieldID: request[fieldID], fieldResult: map[string]any{fieldTurn: map[string]any{fieldID: turnID, fieldStatus: "inProgress", "items": []any{}}}}
 }
 
 func answerCompaction(notifications ...map[string]any) func(map[string]any) []map[string]any {
@@ -421,5 +457,37 @@ func TestCompactDeadlineIsTenMinutes(t *testing.T) {
 func TestManifestDeclaresTheCompactor(t *testing.T) {
 	if !backendPlugin(t).Manifest.Capabilities.Compactor {
 		t.Fatal("the codex manifest does not declare Capabilities.Compactor")
+	}
+}
+
+func TestCompactEndsOnTheCompletionOfItsThreadWithoutTurnStarted(t *testing.T) {
+	peer := newCompactPeer(t, func(request map[string]any) []map[string]any {
+		if request[fieldMethod] != methodCompactStart {
+			return nil
+		}
+		return []map[string]any{{fieldID: request[fieldID], fieldResult: make(map[string]any)}, completedTurn()}
+	})
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	if _, err := compactingResponder(peer).Compact(ctx, contracts.CompactRequest{}, nil); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+}
+
+func TestCompactRefusesWhenTheOpenFails(t *testing.T) {
+	r := &streamResponder{resumeID: "thread-1", start: func(context.Context, string) (*appSession, error) {
+		return nil, errors.New("open refused")
+	}}
+	var err error
+	func() {
+		defer func() {
+			if p := recover(); p != nil {
+				t.Errorf("Compact panicked instead of refusing: %v", p)
+			}
+		}()
+		_, err = r.Compact(t.Context(), contracts.CompactRequest{}, nil)
+	}()
+	if err == nil || !strings.Contains(err.Error(), "open refused") {
+		t.Fatalf("err=%v, want the open failure", err)
 	}
 }

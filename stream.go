@@ -364,7 +364,7 @@ func (s *appSession) Send(ctx context.Context, text string, onEvent func(contrac
 	if err := s.write(turnStartRequest(requestID, s.threadID, text, s.model, s.effort)); err != nil {
 		return turnResult{}, errors.Join(errTurnNotStarted, err)
 	}
-	return s.awaitTurn(ctx, turnScope{threadID: s.threadID}, onEvent)
+	return s.awaitTurn(ctx, turnScope{threadID: s.threadID, requestID: requestID}, onEvent)
 }
 
 func (s *appSession) awaitTurn(ctx context.Context, scope turnScope, onEvent func(contracts.BackendEvent)) (turnResult, error) {
@@ -385,6 +385,7 @@ func (s *appSession) awaitTurn(ctx context.Context, scope turnScope, onEvent fun
 
 type turnScope struct {
 	threadID   string
+	requestID  int
 	compaction bool
 }
 
@@ -423,6 +424,7 @@ func (c *turnCollector) consumeLine(ctx context.Context, line []byte, approvals 
 	if rpcErr, ok := msg[fieldError].(map[string]any); ok {
 		return c.reject(rpcErr), true, nil
 	}
+	c.adoptTurnResponse(msg)
 	if isServerRequest(msg) {
 		return turnResult{}, false, answerApproval(ctx, msg, msg[fieldID], approvals, respondHoldingSendLock)
 	}
@@ -441,12 +443,25 @@ func isServerRequest(msg map[string]any) bool {
 	return hasID && msg[fieldMethod] != nil
 }
 
+func (c *turnCollector) adoptTurnResponse(msg map[string]any) {
+	if c.turnID != "" || c.scope.requestID == 0 {
+		return
+	}
+	if id, ok := msg[fieldID].(float64); !ok || int(id) != c.scope.requestID {
+		return
+	}
+	c.turnID = stringField(mapField(mapField(msg, fieldResult), fieldTurn), fieldID)
+}
+
 func (c *turnCollector) belongs(method string, params map[string]any) bool {
 	if c.scope.threadID != "" && stringField(params, fieldThreadID) != c.scope.threadID {
 		return false
 	}
 	if method == methodTurnEnd {
-		return c.turnID != "" && turnIDOf(params) == c.turnID
+		if c.turnID == "" {
+			return c.scope.compaction
+		}
+		return turnIDOf(params) == c.turnID
 	}
 	return c.turnID == "" || turnIDOf(params) == c.turnID
 }
