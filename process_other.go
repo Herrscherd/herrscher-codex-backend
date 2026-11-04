@@ -3,6 +3,7 @@
 package codex
 
 import (
+	"context"
 	"errors"
 	"os"
 	"os/exec"
@@ -19,7 +20,7 @@ func killProcessTree(cmd *exec.Cmd) error {
 	if cmd.Process == nil {
 		return nil
 	}
-	if exec.Command("taskkill", "/T", "/F", "/PID", strconv.Itoa(cmd.Process.Pid)).Run() == nil {
+	if exec.CommandContext(context.Background(), "taskkill", "/T", "/F", "/PID", strconv.Itoa(cmd.Process.Pid)).Run() == nil {
 		return nil
 	}
 	err := cmd.Process.Kill()
