@@ -55,6 +55,77 @@ Both modes run headless: `approval_policy="never"`,
 turn parameter instead, because the Codex CLI rejects those flags before
 `app-server`.
 
+## Compaction
+
+The stream mode implements `contracts.Compactor`, and its manifest declares
+`Capabilities.Compactor`. `Compact` sends the app-server method
+`thread/compact/start` with the thread id of the session, and it holds the same
+turn lock as `Respond`, so it never runs alongside a turn.
+
+The method and its params come from the protocol schema of `codex-cli` 0.161.0
+(`ThreadCompactStartParams`, whose only field is `threadId`). The compaction is
+read by the same turn reader as a turn. A turn's id comes from the response to
+`turn/start` (`TurnStartResponse.turn.id`, required by the schema), or from its
+`turn/started` notification, which the schema does not guarantee. The reader
+takes a `turn/completed` only when it closes the turn whose id it knows. A
+completion that names another turn is ignored. A completion that arrives before
+the id is known is kept in a queue of at most 16 entries and applied as soon as
+the id is learned. A seventeenth completion that arrives before the id is known
+does not displace the others: the turn fails at once with `errParkedFull`, which
+names the turn that overflowed, and the session is dropped. No completion is
+discarded silently. If the response to `turn/start` and a `turn/started` name two
+different ids for one turn, the turn fails at once with `errTurnIDMismatch`,
+which names both ids, and the session is dropped, because the server may still
+run the turn that was not announced.
+
+A compaction's response is empty (`ThreadCompactStartResponse`), so its id comes
+from the `turnId` of its `item/started` notification for a `contextCompaction`
+item (required by the schema), or from its `turn/started`. The turn lock does
+not identify the compaction: a completion of another turn of the thread closes
+the compaction only if it carries that id. A compaction whose id never arrives
+waits for the context of its caller or its ten-minute deadline.
+
+An `error` notification with `willRetry` false is the failure,
+and the reader still waits for the `turn/completed` that follows it, so that
+completion never leaks into the next turn. An `error` with `willRetry` true is
+ignored, because the server retries it. Its start, an `item/started` of a
+`contextCompaction` item, is reported as a `tool` event named `compaction`; any
+other item is silent.
+
+The reader stops only on the `turn/completed` of its turn or on the context of
+its caller. An `error` with `willRetry` false followed by no `turn/completed`
+leaves it waiting until that context ends: `Respond` has no deadline of its own,
+so the caller must cancel. `Compact` adds its own ten-minute deadline.
+
+With no approver configured, a server request received during a compaction
+(an approval, or any unrecognised request) is accepted, as `Respond` accepts it.
+
+A free instruction is refused, not dropped, and the decision is final for this
+backend: `thread/compact/start` has no field for an instruction, so codex cannot
+honour one. A non-blank `CompactRequest.Instruction` returns an error before
+anything is sent to the app-server.
+
+A compaction needs a thread. With no open session and no thread to resume, it
+refuses with an error instead of starting an empty thread to compact.
+
+The result never claims a size. `thread/tokenUsage/updated` reports the usage of
+the last turn and the running total, not the size of the context after the
+compaction, so `TokensMeasured` stays false and the note says the size was not
+measured.
+
+A failed compaction is not sent again, unlike a turn: a compaction is never run
+twice. A compaction that is cancelled, times out after ten minutes, or loses the
+app-server drops the session, and the next compaction reopens the same thread.
+A compaction refused or failed by codex keeps the session.
+
+When a turn or a compaction is abandoned, the thread is reopened through
+`resumeID`, and the items that the abandoned turn already produced stay in the
+thread history that the reopened session resumes. The reader cannot remove them,
+so the next turn may read them as context. This limit is not verified against a
+live app-server.
+
+The `oneshot` mode has no session to compact, so it does not implement the port.
+
 ## Model catalog
 
 `Models` (`models.go`) is published through `Manifest.Models`, so the host can

@@ -222,13 +222,14 @@ func TestDeclaresPerToolGating(t *testing.T) {
 
 func TestReadTurnAnswersAnApprovalRequestMidTurn(t *testing.T) {
 	lines := `{"id":9,"method":"item/commandExecution/requestApproval","params":{"command":"rm -rf /"}}
-{"method":"turn/completed","params":{"threadId":"t1"}}
+{"method":"turn/started","params":{"threadId":"t1","turn":{"id":"turn-1"}}}
+{"method":"turn/completed","params":{"threadId":"t1","turn":{"id":"turn-1"}}}
 `
 	var sent []map[string]any
 	a := &approver{session: "api", ask: func(context.Context, string, []string) ([]byte, error) {
 		return []byte(`{"decision":"deny"}`), nil
 	}}
-	if _, err := readTurn(context.Background(), bufio.NewReader(strings.NewReader(lines)), nil, a,
+	if _, err := readTurn(context.Background(), bufio.NewReader(strings.NewReader(lines)), turnScope{}, nil, a,
 		func(m map[string]any) error { sent = append(sent, m); return nil }); err != nil {
 		t.Fatal(err)
 	}

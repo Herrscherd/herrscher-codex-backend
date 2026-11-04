@@ -82,15 +82,15 @@ type approvalRequest struct {
 func approvalSubject(method string, params map[string]any) (approvalRequest, bool) {
 	switch method {
 	case "item/commandExecution/requestApproval", "execCommandApproval":
-		return approvalRequest{tool: "Bash", subject: stringField(params, "command")}, true
+		return approvalRequest{tool: toolBash, subject: stringField(params, fieldCommand)}, true
 	case "item/fileChange/requestApproval", "applyPatchApproval":
-		changes := mapField(params, "fileChanges")
+		changes := mapField(params, fieldFileChanges)
 		paths := make([]string, 0, len(changes))
 		for p := range changes {
 			paths = append(paths, p)
 		}
 		sort.Strings(paths)
-		return approvalRequest{tool: "Write", subject: strings.Join(paths, " ")}, true
+		return approvalRequest{tool: toolWrite, subject: strings.Join(paths, " ")}, true
 	}
 	return approvalRequest{}, false
 }
@@ -112,7 +112,7 @@ func approvalPolicy(gated bool) string {
 
 func answerApproval(ctx context.Context, msg map[string]any, requestID any, approvals *approver, respondHoldingSendLock func(map[string]any) error) error {
 	method := stringField(msg, fieldMethod)
-	params := mapField(msg, "params")
+	params := mapField(msg, fieldParams)
 	request, known := approvalSubject(method, params)
 	if !known {
 		return respondHoldingSendLock(approvalResponse(requestID, approvals.unrecognisedAllowed(method)))

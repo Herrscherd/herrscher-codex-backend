@@ -51,6 +51,10 @@ type streamResponder struct {
 
 var errTurnNotStarted = errors.New("codex: app-server closed before any turn output")
 
+var errTurnIDMismatch = errors.New("codex named two ids for one turn")
+
+var errParkedFull = errors.New("codex ended more turns than it could hold before naming the turn of its response")
+
 var (
 	errTurnFailed = errors.New("codex turn failed")
 	errNoThreadID = errors.New("codex app-server returned no thread id")
@@ -60,6 +64,13 @@ func (r *streamResponder) rememberToken(threadID string) {
 	r.tokenMu.Lock()
 	defer r.tokenMu.Unlock()
 	r.token = threadID
+}
+
+func (r *streamResponder) abandonUnsettled(err error) error {
+	if errors.Is(err, errTurnIDMismatch) || errors.Is(err, errParkedFull) {
+		r.dropSession()
+	}
+	return err
 }
 
 func (r *streamResponder) Respond(ctx context.Context, prompt contracts.Prompt, onEvent func(contracts.BackendEvent)) (string, error) {
@@ -74,10 +85,10 @@ func (r *streamResponder) Respond(ctx context.Context, prompt contracts.Prompt, 
 	result, err := r.sess.Send(ctx, content, onEvent)
 	if err != nil {
 		if !restartable(err) {
-			return "", turnError(err)
+			return "", turnError(r.abandonUnsettled(err))
 		}
 		if result, err = r.reopen(ctx, content, onEvent); err != nil {
-			return "", err
+			return "", r.abandonUnsettled(err)
 		}
 	}
 	if result.IsError {
@@ -176,6 +187,7 @@ type turnResult struct {
 	ThreadID  string
 	IsError   bool
 	ErrMsg    string
+	rejected  bool
 	completed bool
 }
 
@@ -207,7 +219,7 @@ func newAppSession(stdin io.WriteCloser, out io.Reader) *appSession {
 }
 
 func initializeRequest(id int) map[string]any {
-	return map[string]any{"id": id, fieldMethod: "initialize", fieldParams: map[string]any{"clientInfo": map[string]any{"name": "herrscher_codex_backend", "title": "Herrscher Codex Backend", "version": "0.1.0"}}}
+	return map[string]any{fieldID: id, fieldMethod: "initialize", fieldParams: map[string]any{"clientInfo": map[string]any{"name": "herrscher_codex_backend", "title": "Herrscher Codex Backend", "version": "0.1.0"}}}
 }
 
 func threadStartRequest(requestID int, model, dir, resume string) map[string]any {
@@ -219,20 +231,20 @@ func threadStartRequest(requestID int, model, dir, resume string) map[string]any
 		params["cwd"] = dir
 	}
 	if resume != "" {
-		return map[string]any{"id": requestID, fieldMethod: "thread/resume", fieldParams: map[string]any{"threadId": resume}}
+		return map[string]any{fieldID: requestID, fieldMethod: "thread/resume", fieldParams: map[string]any{fieldThreadID: resume}}
 	}
-	return map[string]any{"id": requestID, fieldMethod: "thread/start", fieldParams: params}
+	return map[string]any{fieldID: requestID, fieldMethod: "thread/start", fieldParams: params}
 }
 
 func turnStartRequest(requestID int, thread, text, model, effort string) map[string]any {
-	params := map[string]any{"threadId": thread, "input": []any{map[string]any{"type": contentText, fieldText: text}}}
+	params := map[string]any{fieldThreadID: thread, fieldInput: []any{map[string]any{fieldType: contentText, fieldText: text}}}
 	if model != "" {
 		params["model"] = model
 	}
 	if effort != "" {
 		params["effort"] = effort
 	}
-	return map[string]any{"id": requestID, fieldMethod: "turn/start", fieldParams: params}
+	return map[string]any{fieldID: requestID, fieldMethod: "turn/start", fieldParams: params}
 }
 
 func (s *appSession) write(msg map[string]any) error {
@@ -251,7 +263,7 @@ func (s *appSession) waitResponse(requestID int) (map[string]any, error) {
 		if len(line) > 0 {
 			var msg map[string]any
 			if json.Unmarshal(line, &msg) == nil {
-				if n, ok := msg["id"].(float64); ok && int(n) == requestID {
+				if n, ok := msg[fieldID].(float64); ok && int(n) == requestID {
 					return msg, nil
 				}
 			}
@@ -284,8 +296,8 @@ func (s *appSession) initialize(resume string) error {
 		return err
 	}
 	result := mapField(msg, fieldResult)
-	thread := mapField(result, "thread")
-	s.threadID = stringField(thread, "id")
+	thread := mapField(result, fieldThread)
+	s.threadID = stringField(thread, fieldID)
 	if s.threadID == "" {
 		s.threadID = resume
 	}
@@ -363,9 +375,13 @@ func (s *appSession) Send(ctx context.Context, text string, onEvent func(contrac
 	if err := s.write(turnStartRequest(requestID, s.threadID, text, s.model, s.effort)); err != nil {
 		return turnResult{}, errors.Join(errTurnNotStarted, err)
 	}
+	return s.awaitTurn(ctx, turnScope{threadID: s.threadID, requestID: requestID}, onEvent)
+}
+
+func (s *appSession) awaitTurn(ctx context.Context, scope turnScope, onEvent func(contracts.BackendEvent)) (turnResult, error) {
 	result := make(chan turnOutcome, 1)
 	go func() {
-		tr, err := readTurn(ctx, s.out, onEvent, s.approvalsIfGated, s.write)
+		tr, err := readTurn(ctx, s.out, scope, onEvent, s.approvalsIfGated, s.write)
 		result <- turnOutcome{turn: tr, err: err}
 	}()
 	select {
@@ -378,15 +394,26 @@ func (s *appSession) Send(ctx context.Context, text string, onEvent func(contrac
 	}
 }
 
+type turnScope struct {
+	threadID   string
+	requestID  int
+	compaction bool
+}
+
+const maxParkedCompletions = 16
+
 type turnCollector struct {
+	scope    turnScope
 	onEvent  func(contracts.BackendEvent)
+	turnID   string
+	parked   []map[string]any
 	result   turnResult
 	deltas   strings.Builder
 	observed bool
 }
 
-func readTurn(ctx context.Context, reader *bufio.Reader, onEvent func(contracts.BackendEvent), approvals *approver, respondHoldingSendLock func(map[string]any) error) (turnResult, error) {
-	collector := &turnCollector{onEvent: onEvent}
+func readTurn(ctx context.Context, reader *bufio.Reader, scope turnScope, onEvent func(contracts.BackendEvent), approvals *approver, respondHoldingSendLock func(map[string]any) error) (turnResult, error) {
+	collector := &turnCollector{scope: scope, onEvent: onEvent}
 	for {
 		line, err := reader.ReadBytes('\n')
 		if len(line) > 0 {
@@ -408,36 +435,129 @@ func (c *turnCollector) consumeLine(ctx context.Context, line []byte, approvals 
 		return turnResult{}, false, nil
 	}
 	c.observed = true
-	if rpcErr, ok := msg["error"].(map[string]any); ok {
+	if rpcErr, ok := msg[fieldError].(map[string]any); ok {
 		return c.reject(rpcErr), true, nil
 	}
-	if isServerRequest(msg) {
-		return turnResult{}, false, answerApproval(ctx, msg, msg["id"], approvals, respondHoldingSendLock)
+	if err := c.adoptTurnResponse(msg); err != nil {
+		return turnResult{}, true, err
 	}
-	c.handleAppEvent(msg)
-	if c.finished() {
+	if c.result.completed {
+		return c.outcome(), true, nil
+	}
+	if isServerRequest(msg) {
+		return turnResult{}, false, answerApproval(ctx, msg, msg[fieldID], approvals, respondHoldingSendLock)
+	}
+	if err := c.handleNotification(msg); err != nil {
+		return turnResult{}, true, err
+	}
+	if c.result.completed {
 		return c.outcome(), true, nil
 	}
 	return turnResult{}, false, nil
 }
 
 func isServerRequest(msg map[string]any) bool {
-	_, hasID := msg["id"]
+	_, hasID := msg[fieldID]
 	return hasID && msg[fieldMethod] != nil
+}
+
+func (c *turnCollector) adoptTurnResponse(msg map[string]any) error {
+	if c.scope.requestID == 0 || msg[fieldMethod] != nil {
+		return nil
+	}
+	if id, ok := msg[fieldID].(float64); !ok || int(id) != c.scope.requestID {
+		return nil
+	}
+	return c.learnTurnID(stringField(mapField(mapField(msg, fieldResult), fieldTurn), fieldID))
+}
+
+func (c *turnCollector) handleNotification(msg map[string]any) error {
+	params := mapField(msg, fieldParams)
+	if c.scope.threadID != "" && stringField(params, fieldThreadID) != c.scope.threadID {
+		return nil
+	}
+	switch stringField(msg, fieldMethod) {
+	case methodTurnStart:
+		return c.learnTurnID(stringField(mapField(params, fieldTurn), fieldID))
+	case methodTurnEnd:
+		return c.observeCompletion(mapField(params, fieldTurn))
+	case methodItemStart:
+		if c.scope.compaction && isContextCompactionItem(mapField(params, fieldItem)) {
+			if err := c.learnTurnID(turnIDOf(params)); err != nil {
+				return err
+			}
+		}
+	}
+	if c.belongs(params) {
+		c.handleAppEvent(msg)
+	}
+	return nil
+}
+
+func (c *turnCollector) learnTurnID(turnID string) error {
+	if turnID == "" {
+		return nil
+	}
+	if c.turnID == "" {
+		c.turnID = turnID
+		c.releaseParked()
+		return nil
+	}
+	if c.turnID != turnID {
+		return fmt.Errorf("%w: codex named turn %q and then turn %q", errTurnIDMismatch, c.turnID, turnID)
+	}
+	return nil
+}
+
+func (c *turnCollector) observeCompletion(turn map[string]any) error {
+	if c.turnID == "" {
+		return c.park(turn)
+	}
+	if stringField(turn, fieldID) == c.turnID {
+		c.complete(turn)
+	}
+	return nil
+}
+
+func (c *turnCollector) park(turn map[string]any) error {
+	if len(c.parked) == maxParkedCompletions {
+		return fmt.Errorf("%w (queue of %d): turn %q ended before its id was known", errParkedFull, maxParkedCompletions, stringField(turn, fieldID))
+	}
+	c.parked = append(c.parked, turn)
+	return nil
+}
+
+func (c *turnCollector) releaseParked() {
+	parked := c.parked
+	c.parked = nil
+	for _, turn := range parked {
+		if stringField(turn, fieldID) == c.turnID {
+			c.complete(turn)
+			return
+		}
+	}
+}
+
+func (c *turnCollector) belongs(params map[string]any) bool {
+	return c.turnID == "" || turnIDOf(params) == c.turnID
+}
+
+func turnIDOf(params map[string]any) string {
+	if id := stringField(params, fieldTurnID); id != "" {
+		return id
+	}
+	return stringField(mapField(params, fieldTurn), fieldID)
 }
 
 func (c *turnCollector) reject(rpcErr map[string]any) turnResult {
 	c.result.IsError = true
-	c.result.ErrMsg = stringField(rpcErr, "message")
+	c.result.rejected = true
+	c.result.ErrMsg = stringField(rpcErr, fieldMessage)
 	if c.result.ErrMsg == "" {
 		c.result.ErrMsg = "Codex rejected the turn"
 	}
-	c.emit(contracts.BackendEvent{Kind: eventResult, IsError: true})
+	c.emitResult()
 	return c.result
-}
-
-func (c *turnCollector) finished() bool {
-	return c.result.IsError || c.result.completed
 }
 
 func (c *turnCollector) outcome() turnResult {
@@ -455,17 +575,18 @@ func (c *turnCollector) readFailure(err error) (turnResult, error) {
 }
 
 func (c *turnCollector) handleAppEvent(msg map[string]any) {
-	method := stringField(msg, fieldMethod)
 	params := mapField(msg, fieldParams)
-	switch method {
-	case "item/agentMessage/delta":
-		c.appendDelta(stringField(params, "delta"))
-	case "item/started", "item/completed":
-		c.observeItem(mapField(params, "item"))
-	case "turn/completed":
-		c.complete(mapField(params, "turn"))
-	case "turn/failed", "error":
-		c.fail(method, stringField(params, "message"))
+	switch stringField(msg, fieldMethod) {
+	case methodAgentText:
+		if !c.scope.compaction {
+			c.appendDelta(stringField(params, fieldDelta))
+		}
+	case methodItemStart:
+		c.observeStarted(mapField(params, fieldItem))
+	case methodItemEnd:
+		c.observeItem(mapField(params, fieldItem))
+	case methodError:
+		c.observeError(params)
 	}
 }
 
@@ -477,35 +598,57 @@ func (c *turnCollector) appendDelta(delta string) {
 	c.emit(contracts.BackendEvent{Kind: eventText, Detail: delta})
 }
 
+func (c *turnCollector) observeStarted(item map[string]any) {
+	if c.scope.compaction {
+		if isContextCompactionItem(item) {
+			c.emit(contracts.BackendEvent{Kind: "tool", Tool: compactionTool})
+		}
+		return
+	}
+	c.observeItem(item)
+}
+
 func (c *turnCollector) observeItem(item map[string]any) {
-	switch stringField(item, "type") {
+	if c.scope.compaction {
+		return
+	}
+	switch stringField(item, fieldType) {
 	case "agentMessage", "agent_message":
 		if v, ok := item[fieldText].(string); ok && v != "" {
 			c.result.Text = v
 		}
 	case "commandExecution", "command_execution":
-		if cmd := stringField(item, "command"); cmd != "" {
-			c.emit(contracts.BackendEvent{Kind: "tool", Tool: "command", Detail: cmd})
+		if cmd := stringField(item, fieldCommand); cmd != "" {
+			c.emit(contracts.BackendEvent{Kind: "tool", Tool: toolCommand, Detail: cmd})
 		}
 	}
 }
 
-func (c *turnCollector) complete(turn map[string]any) {
-	status := stringField(turn, "status")
-	c.result.IsError = status == "failed" || status == "error"
-	c.result.ErrMsg = stringField(turn, "error")
-	c.emit(contracts.BackendEvent{Kind: eventResult, IsError: c.result.IsError})
-	c.result.completed = true
+func (c *turnCollector) observeError(params map[string]any) {
+	if retry, ok := params[fieldWillRetry].(bool); ok && retry {
+		return
+	}
+	c.result.IsError = true
+	if message := stringField(mapField(params, fieldError), fieldMessage); message != "" {
+		c.result.ErrMsg = message
+	}
 }
 
-func (c *turnCollector) fail(method, message string) {
-	c.result.IsError = true
-	c.result.ErrMsg = message
-	if c.result.ErrMsg == "" {
-		c.result.ErrMsg = method
+func (c *turnCollector) complete(turn map[string]any) {
+	if stringField(turn, fieldStatus) == statusFailed {
+		c.result.IsError = true
 	}
-	c.emit(contracts.BackendEvent{Kind: eventResult, IsError: true})
+	if c.result.ErrMsg == "" {
+		c.result.ErrMsg = stringField(mapField(turn, fieldError), fieldMessage)
+	}
 	c.result.completed = true
+	c.emitResult()
+}
+
+func (c *turnCollector) emitResult() {
+	if !c.scope.compaction {
+		c.emit(contracts.BackendEvent{Kind: eventResult, IsError: c.result.IsError})
+	}
 }
 
 func (c *turnCollector) emit(event contracts.BackendEvent) {
