@@ -63,20 +63,32 @@ The stream mode implements `contracts.Compactor`, and its manifest declares
 turn lock as `Respond`, so it never runs alongside a turn.
 
 The method and its params come from the protocol schema of `codex-cli` 0.161.0
-(`ThreadCompactStartParams`, whose only field is `threadId`). The compaction
-ends on `turn/completed`, on `turn/failed`, or on an `error` notification whose
-`willRetry` is false. Its start, an `item/started` of a `contextCompaction` item,
-is reported as a `tool` event named `compaction`.
+(`ThreadCompactStartParams`, whose only field is `threadId`). The compaction is
+read by the same turn reader as a turn: it ends on the `turn/completed` of its
+own turn. An `error` notification with `willRetry` false is the failure, and the
+reader still waits for the `turn/completed` that follows it, so that completion
+never leaks into the next turn. An `error` with `willRetry` true is ignored,
+because the server retries it. Events of another thread or another turn are
+ignored. Its start, an `item/started` of a `contextCompaction` item, is reported
+as a `tool` event named `compaction`.
 
-A free instruction is refused, not dropped. `thread/compact/start` has no field
-for one, so a non-blank `CompactRequest.Instruction` returns an error before
+A free instruction is refused, not dropped, and the decision is final for this
+backend: `thread/compact/start` has no field for an instruction, so codex cannot
+honour one. A non-blank `CompactRequest.Instruction` returns an error before
 anything is sent to the app-server.
+
+A compaction needs a thread. With no open session and no thread to resume, it
+refuses with an error instead of starting an empty thread to compact.
 
 The result never claims a size. `thread/tokenUsage/updated` reports the usage of
 the last turn and the running total, not the size of the context after the
 compaction, so `TokensMeasured` stays false and the note says the size was not
-measured. A failed compaction is not sent again, unlike a turn: a compaction is
-never run twice.
+measured.
+
+A failed compaction is not sent again, unlike a turn: a compaction is never run
+twice. A compaction that is cancelled, times out after ten minutes, or loses the
+app-server drops the session, and the next compaction reopens the same thread.
+A compaction refused or failed by codex keeps the session.
 
 The `oneshot` mode has no session to compact, so it does not implement the port.
 

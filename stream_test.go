@@ -96,7 +96,7 @@ func TestReadTurnMapsCodexEvents(t *testing.T) {
 		`{"method":"turn/completed","params":{"turn":{"status":"completed"}}}`,
 	}, "\n") + "\n"
 	var got []contracts.BackendEvent
-	tr, err := readTurn(context.Background(), bufio.NewReader(strings.NewReader(lines)), func(e contracts.BackendEvent) { got = append(got, e) }, nil, nil)
+	tr, err := readTurn(context.Background(), bufio.NewReader(strings.NewReader(lines)), turnScope{}, func(e contracts.BackendEvent) { got = append(got, e) }, nil, nil)
 	if err != nil || tr.Text != "hello world" {
 		t.Fatalf("turn=%+v err=%v", tr, err)
 	}
@@ -112,7 +112,7 @@ func TestReadTurnMapsCodexCamelCaseItems(t *testing.T) {
 		`{"method":"turn/completed","params":{"turn":{"status":"completed"}}}`,
 	}, "\n") + "\n"
 	var got []contracts.BackendEvent
-	tr, err := readTurn(context.Background(), bufio.NewReader(strings.NewReader(lines)), func(e contracts.BackendEvent) { got = append(got, e) }, nil, nil)
+	tr, err := readTurn(context.Background(), bufio.NewReader(strings.NewReader(lines)), turnScope{}, func(e contracts.BackendEvent) { got = append(got, e) }, nil, nil)
 	if err != nil || tr.Text != "response without delta" {
 		t.Fatalf("turn=%+v err=%v", tr, err)
 	}
@@ -125,14 +125,14 @@ func TestReadTurnHandlesHugeLine(t *testing.T) {
 	huge := strings.Repeat("x", 200_000)
 	input := `{"method":"item/agentMessage/delta","params":{"delta":"` + huge + `"}}` + "\n" +
 		`{"method":"turn/completed","params":{"turn":{"status":"completed"}}}` + "\n"
-	if _, err := readTurn(context.Background(), bufio.NewReader(strings.NewReader(input)), nil, nil, nil); err != nil {
+	if _, err := readTurn(context.Background(), bufio.NewReader(strings.NewReader(input)), turnScope{}, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func TestReadTurnReturnsJSONRPCError(t *testing.T) {
 	input := `{"id":3,"error":{"message":"turn rejected"}}` + "\n"
-	tr, err := readTurn(context.Background(), bufio.NewReader(strings.NewReader(input)), nil, nil, nil)
+	tr, err := readTurn(context.Background(), bufio.NewReader(strings.NewReader(input)), turnScope{}, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +160,7 @@ func TestAppSessionSend(t *testing.T) {
 	inR, inW := io.Pipe()
 	outR, outW := io.Pipe()
 	replies := make(chan error, 1)
-	go func() { replies <- replyOnce(inR, outW) }()
+	go func() { replies <- replyOnce(inR, outW, "thread-1") }()
 	s := newAppSession(inW, outR)
 	s.threadID = "thread-1"
 	tr, err := s.Send(context.Background(), "hi", nil)
@@ -289,7 +289,7 @@ func TestReadTurnDistinguishesAStartedTurnFromASilentServer(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := readTurn(context.Background(), bufio.NewReader(strings.NewReader(tc.stream)), nil, nil, func(map[string]any) error { return nil })
+			_, err := readTurn(context.Background(), bufio.NewReader(strings.NewReader(tc.stream)), turnScope{}, nil, nil, func(map[string]any) error { return nil })
 			if err == nil {
 				t.Fatal("want an error")
 			}
@@ -316,7 +316,7 @@ func TestRespondReopensTheThreadWhenTheServerDiesBeforeTheTurn(t *testing.T) {
 		inR, inW := io.Pipe()
 		outR, outW := io.Pipe()
 		replies := make(chan error, 1)
-		go func() { replies <- replyOnce(inR, outW) }()
+		go func() { replies <- replyOnce(inR, outW, "thread-2") }()
 		t.Cleanup(func() {
 			if err := <-replies; err != nil {
 				t.Errorf("reply: %v", err)
@@ -348,11 +348,11 @@ func TestRespondReopensTheThreadWhenTheServerDiesBeforeTheTurn(t *testing.T) {
 	}
 }
 
-func replyOnce(in io.Reader, out *io.PipeWriter) error {
+func replyOnce(in io.Reader, out *io.PipeWriter, thread string) error {
 	if _, err := bufio.NewReader(in).ReadBytes('\n'); err != nil {
 		return out.Close()
 	}
-	_, err := io.WriteString(out, `{"method":"item/agentMessage/delta","params":{"delta":"ok"}}`+"\n"+`{"method":"turn/completed","params":{"turn":{"status":"completed"}}}`+"\n")
+	_, err := io.WriteString(out, `{"method":"item/agentMessage/delta","params":{"threadId":"`+thread+`","delta":"ok"}}`+"\n"+`{"method":"turn/completed","params":{"threadId":"`+thread+`","turn":{"status":"completed"}}}`+"\n")
 	return errors.Join(err, out.Close())
 }
 
@@ -421,8 +421,8 @@ func serveTurns(in io.Reader, out *io.PipeWriter) error {
 		if _, err := reader.ReadBytes('\n'); err != nil {
 			return out.Close()
 		}
-		reply := `{"method":"item/agentMessage/delta","params":{"delta":"ok"}}` + "\n" +
-			`{"method":"turn/completed","params":{"turn":{"status":"completed"}}}` + "\n"
+		reply := `{"method":"item/agentMessage/delta","params":{"threadId":"thread-1","delta":"ok"}}` + "\n" +
+			`{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"status":"completed"}}}` + "\n"
 		if _, err := io.WriteString(out, reply); err != nil {
 			return errors.Join(err, out.Close())
 		}
@@ -528,5 +528,50 @@ func TestRespondOpensOneSessionForConcurrentTurns(t *testing.T) {
 	}
 	if err := r.Close(); err != nil {
 		t.Errorf("Close: %v", err)
+	}
+}
+
+func agentText(turnID, text string) map[string]any {
+	return notification("item/completed", map[string]any{fieldThreadID: "thread-1", fieldTurnID: turnID, fieldItem: map[string]any{fieldType: "agentMessage", fieldText: text}})
+}
+
+func TestRespondReadsTheTurnToItsEndAfterAnErrorNotice(t *testing.T) {
+	turns := 0
+	peer := newCompactPeer(t, func(request map[string]any) []map[string]any {
+		if request[fieldMethod] != "turn/start" {
+			return nil
+		}
+		turns++
+		if turns == 1 {
+			return []map[string]any{errorNotice(false, "boom"), turnEnded("failed", nil)}
+		}
+		return []map[string]any{agentText("turn-1", "deux"), completedTurn()}
+	})
+	r := &streamResponder{sess: peer.session}
+	if _, err := r.Respond(t.Context(), contracts.Prompt{Content: "un"}, nil); !errors.Is(err, errTurnFailed) {
+		t.Fatalf("first turn err=%v, want errTurnFailed", err)
+	}
+	got, err := r.Respond(t.Context(), contracts.Prompt{Content: "deux"}, nil)
+	if err != nil || got != "deux" {
+		t.Fatalf("second turn got %q, %v; want its own answer", got, err)
+	}
+}
+
+func TestRespondIgnoresACompletionOfAnotherTurn(t *testing.T) {
+	peer := newCompactPeer(t, func(request map[string]any) []map[string]any {
+		if request[fieldMethod] != "turn/start" {
+			return nil
+		}
+		return []map[string]any{
+			notification("turn/started", map[string]any{fieldThreadID: "thread-1", fieldTurn: map[string]any{fieldID: "turn-2"}}),
+			notification("turn/completed", map[string]any{fieldThreadID: "thread-1", fieldTurn: map[string]any{fieldID: "turn-1", fieldStatus: "failed"}}),
+			agentText("turn-2", "réponse"),
+			notification("turn/completed", map[string]any{fieldThreadID: "thread-1", fieldTurn: map[string]any{fieldID: "turn-2", fieldStatus: "completed"}}),
+		}
+	})
+	r := &streamResponder{sess: peer.session}
+	got, err := r.Respond(t.Context(), contracts.Prompt{Content: "un"}, nil)
+	if err != nil || got != "réponse" {
+		t.Fatalf("got %q, %v; want the answer of its own turn", got, err)
 	}
 }

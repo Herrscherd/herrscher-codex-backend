@@ -8,6 +8,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	contracts "github.com/Herrscherd/herrscher-contracts"
 )
@@ -78,7 +79,24 @@ func notification(method string, params map[string]any) map[string]any {
 }
 
 func completedTurn() map[string]any {
-	return notification("turn/completed", map[string]any{"turn": map[string]any{"status": "completed"}})
+	return turnEnded("completed", nil)
+}
+
+func turnEnded(status string, turnError map[string]any) map[string]any {
+	turn := map[string]any{"id": "turn-1", "status": status}
+	if turnError != nil {
+		turn[fieldError] = turnError
+	}
+	return notification("turn/completed", map[string]any{fieldThreadID: "thread-1", fieldTurn: turn})
+}
+
+func errorNotice(willRetry bool, message string) map[string]any {
+	return notification("error", map[string]any{
+		fieldThreadID:  "thread-1",
+		fieldTurnID:    "turn-1",
+		fieldWillRetry: willRetry,
+		fieldError:     map[string]any{fieldMessage: message},
+	})
 }
 
 func compactingResponder(peer compactPeer) *streamResponder {
@@ -117,7 +135,7 @@ func TestCompactSendsABlankInstructionAsNone(t *testing.T) {
 
 func TestCompactRefusesAFreeInstructionBeforeOpeningASession(t *testing.T) {
 	opened := 0
-	r := &streamResponder{start: func(context.Context, string) (*appSession, error) {
+	r := &streamResponder{resumeID: "thread-1", start: func(context.Context, string) (*appSession, error) {
 		opened++
 		return nil, errors.New("must not open")
 	}}
@@ -127,6 +145,39 @@ func TestCompactRefusesAFreeInstructionBeforeOpeningASession(t *testing.T) {
 	}
 	if opened != 0 {
 		t.Fatalf("opened %d sessions, want none", opened)
+	}
+}
+
+func TestCompactRefusesWhenNoThreadIsOpenOrResumable(t *testing.T) {
+	opened := 0
+	r := &streamResponder{start: func(context.Context, string) (*appSession, error) {
+		opened++
+		return nil, errors.New("must not open")
+	}}
+	_, err := r.Compact(t.Context(), contracts.CompactRequest{}, nil)
+	if !errors.Is(err, errCompactNoThread) {
+		t.Fatalf("err=%v, want errCompactNoThread", err)
+	}
+	if opened != 0 {
+		t.Fatalf("opened %d sessions, want none", opened)
+	}
+}
+
+func TestCompactOpensTheThreadWhenNoSessionIsOpen(t *testing.T) {
+	peer := newCompactPeer(t, answerCompaction(completedTurn()))
+	var resumed []string
+	r := &streamResponder{resumeID: "thread-1", start: func(_ context.Context, resume string) (*appSession, error) {
+		resumed = append(resumed, resume)
+		return peer.session, nil
+	}}
+	if _, err := r.Compact(t.Context(), contracts.CompactRequest{}, nil); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	if len(resumed) != 1 || resumed[0] != "thread-1" {
+		t.Fatalf("opened with %v, want one open on thread-1", resumed)
+	}
+	if request := <-peer.requests; request["method"] != "thread/compact/start" {
+		t.Fatalf("method=%v, want thread/compact/start", request["method"])
 	}
 }
 
@@ -153,8 +204,8 @@ func TestCompactReportsNoMeasuredSizeEvenWhenUsageArrives(t *testing.T) {
 }
 
 func TestCompactReportsItsStartAsAToolEventOnly(t *testing.T) {
-	started := notification("item/started", map[string]any{"item": map[string]any{"id": "c1", "type": "contextCompaction"}})
-	summary := notification("item/agentMessage/delta", map[string]any{"delta": "résumé de la conversation"})
+	started := notification("item/started", map[string]any{fieldThreadID: "thread-1", fieldTurnID: "turn-1", fieldItem: map[string]any{"id": "c1", fieldType: itemContextCompaction}})
+	summary := notification("item/agentMessage/delta", map[string]any{fieldThreadID: "thread-1", fieldTurnID: "turn-1", fieldDelta: "résumé de la conversation"})
 	peer := newCompactPeer(t, answerCompaction(started, summary, completedTurn()))
 	var events []contracts.BackendEvent
 	if _, err := compactingResponder(peer).Compact(t.Context(), contracts.CompactRequest{}, func(e contracts.BackendEvent) {
@@ -162,8 +213,16 @@ func TestCompactReportsItsStartAsAToolEventOnly(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Compact: %v", err)
 	}
-	if len(events) != 1 || events[0].Kind != "tool" || events[0].Tool != "compaction" {
+	if len(events) != 1 || events[0].Kind != "tool" || events[0].Tool != compactionTool {
 		t.Fatalf("events=%+v, want one tool event named compaction", events)
+	}
+}
+
+func TestCompactRunsWithoutAnEventSink(t *testing.T) {
+	started := notification("item/started", map[string]any{fieldThreadID: "thread-1", fieldTurnID: "turn-1", fieldItem: map[string]any{"id": "c1", fieldType: itemContextCompaction}})
+	peer := newCompactPeer(t, answerCompaction(started, completedTurn()))
+	if _, err := compactingResponder(peer).Compact(t.Context(), contracts.CompactRequest{}, nil); err != nil {
+		t.Fatalf("Compact without a sink: %v", err)
 	}
 }
 
@@ -179,16 +238,15 @@ func TestCompactWrapsARejectedRequest(t *testing.T) {
 
 func TestCompactWrapsAFailedCompaction(t *testing.T) {
 	cases := []struct {
-		name         string
-		notification map[string]any
+		name          string
+		notifications []map[string]any
 	}{
-		{name: "turn completed as failed", notification: notification("turn/completed", map[string]any{"turn": map[string]any{"status": "failed", "error": "context overflow"}})},
-		{name: "turn failed", notification: notification("turn/failed", map[string]any{"message": "context overflow"})},
-		{name: "error that will not retry", notification: notification("error", map[string]any{"willRetry": false, "error": map[string]any{"message": "context overflow"}})},
+		{name: "turn completed as failed", notifications: []map[string]any{turnEnded("failed", map[string]any{fieldMessage: "context overflow"})}},
+		{name: "error that will not retry, then the turn ends", notifications: []map[string]any{errorNotice(false, "context overflow"), turnEnded("failed", nil)}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			peer := newCompactPeer(t, answerCompaction(tc.notification))
+			peer := newCompactPeer(t, answerCompaction(tc.notifications...))
 			_, err := compactingResponder(peer).Compact(t.Context(), contracts.CompactRequest{}, nil)
 			if !errors.Is(err, errCompactionFailed) || !strings.Contains(err.Error(), "context overflow") {
 				t.Fatalf("err=%v, want a wrapped errCompactionFailed carrying the message", err)
@@ -198,11 +256,56 @@ func TestCompactWrapsAFailedCompaction(t *testing.T) {
 }
 
 func TestCompactIgnoresAnErrorThatWillRetry(t *testing.T) {
-	retrying := notification("error", map[string]any{"willRetry": true, "error": map[string]any{"message": "transient"}})
-	peer := newCompactPeer(t, answerCompaction(retrying, completedTurn()))
+	peer := newCompactPeer(t, answerCompaction(errorNotice(true, "transient"), completedTurn()))
 	if _, err := compactingResponder(peer).Compact(t.Context(), contracts.CompactRequest{}, nil); err != nil {
 		t.Fatalf("Compact: %v", err)
 	}
+}
+
+func TestCompactIgnoresEventsOfOtherTurnsAndThreads(t *testing.T) {
+	peer := newCompactPeer(t, answerCompaction(
+		notification("turn/started", map[string]any{fieldThreadID: "thread-1", fieldTurn: map[string]any{fieldID: "turn-1"}}),
+		notification("item/started", map[string]any{fieldThreadID: "thread-2", fieldTurnID: "turn-1", fieldItem: map[string]any{fieldType: itemContextCompaction}}),
+		notification("turn/completed", map[string]any{fieldThreadID: "thread-1", fieldTurn: map[string]any{fieldID: "turn-0", fieldStatus: "failed"}}),
+		notification("turn/completed", map[string]any{fieldThreadID: "thread-2", fieldTurn: map[string]any{fieldID: "turn-1", fieldStatus: "failed"}}),
+		notification("item/started", map[string]any{fieldThreadID: "thread-1", fieldTurnID: "turn-1", fieldItem: map[string]any{fieldType: itemContextCompaction}}),
+		notification("turn/completed", map[string]any{fieldThreadID: "thread-1", fieldTurn: map[string]any{fieldID: "turn-1", fieldStatus: "completed"}}),
+	))
+	var tools int
+	if _, err := compactingResponder(peer).Compact(t.Context(), contracts.CompactRequest{}, func(e contracts.BackendEvent) {
+		if e.Kind == "tool" {
+			tools++
+		}
+	}); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	if tools != 1 {
+		t.Fatalf("tool events=%d, want only the compaction of this thread and turn", tools)
+	}
+}
+
+func TestCompactAnswersAServerRequestMidCompaction(t *testing.T) {
+	approval := map[string]any{fieldID: float64(900), fieldMethod: "item/unknown/requestApproval", fieldParams: map[string]any{fieldThreadID: "thread-1"}}
+	peer := newCompactPeer(t, func(request map[string]any) []map[string]any {
+		if request[fieldMethod] == methodCompactStart {
+			return []map[string]any{approval}
+		}
+		if request[fieldID] == float64(900) {
+			return []map[string]any{completedTurn()}
+		}
+		return nil
+	})
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	if _, err := compactingResponder(peer).Compact(ctx, contracts.CompactRequest{}, nil); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	for len(peer.requests) > 0 {
+		if request := <-peer.requests; request[fieldID] == float64(900) && request[fieldResult] != nil {
+			return
+		}
+	}
+	t.Fatal("the server request was never answered during the compaction")
 }
 
 func TestCompactHonorsCancellation(t *testing.T) {
@@ -218,14 +321,73 @@ func TestCompactHonorsCancellation(t *testing.T) {
 	}
 }
 
+func TestCompactDropsTheSessionItLostAndReopensTheThread(t *testing.T) {
+	lost := newCompactPeer(t, func(map[string]any) []map[string]any { return nil })
+	fresh := newCompactPeer(t, answerCompaction(completedTurn()))
+	ctx, cancel := context.WithCancel(t.Context())
+	go func() {
+		<-lost.requests
+		cancel()
+	}()
+	r := compactingResponder(lost)
+	r.resumeID = ""
+	if _, err := r.Compact(ctx, contracts.CompactRequest{}, nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err=%v, want context.Canceled", err)
+	}
+	if r.sess != nil {
+		t.Fatal("the session stayed attached after the compaction was cancelled")
+	}
+	if r.resumeID != "thread-1" {
+		t.Fatalf("resumeID=%q, want the lost session's thread-1", r.resumeID)
+	}
+	var resumed []string
+	r.start = func(_ context.Context, resume string) (*appSession, error) {
+		resumed = append(resumed, resume)
+		return fresh.session, nil
+	}
+	if _, err := r.Compact(t.Context(), contracts.CompactRequest{}, nil); err != nil {
+		t.Fatalf("Compact after the loss: %v", err)
+	}
+	if len(resumed) != 1 || resumed[0] != "thread-1" {
+		t.Fatalf("reopened with %v, want thread-1", resumed)
+	}
+}
+
+func TestCompactKeepsTheSessionAfterARejection(t *testing.T) {
+	peer := newCompactPeer(t, func(request map[string]any) []map[string]any {
+		return []map[string]any{{"id": request["id"], "error": map[string]any{"message": "compaction refused"}}}
+	})
+	r := compactingResponder(peer)
+	if _, err := r.Compact(t.Context(), contracts.CompactRequest{}, nil); err == nil {
+		t.Fatal("Compact succeeded on a refusal")
+	}
+	if r.sess != peer.session {
+		t.Fatal("a refused compaction dropped a session that is still alive")
+	}
+}
+
 func TestCompactFailsWhenTheServerHangsUp(t *testing.T) {
 	peer := newCompactPeer(t, func(map[string]any) []map[string]any { return nil })
 	go func() {
 		<-peer.requests
 		peer.hangUp()
 	}()
-	if _, err := compactingResponder(peer).Compact(t.Context(), contracts.CompactRequest{}, nil); err == nil {
-		t.Fatal("Compact succeeded although the server hung up before the compaction ended")
+	_, err := compactingResponder(peer).Compact(t.Context(), contracts.CompactRequest{}, nil)
+	if !errors.Is(err, io.EOF) {
+		t.Fatalf("err=%v, want the end of the stream (io.EOF)", err)
+	}
+}
+
+func TestCompactDeadlineIsTenMinutes(t *testing.T) {
+	ctx, cancel := compactDeadline(t.Context())
+	defer cancel()
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("the compaction has no deadline")
+	}
+	remaining := time.Until(deadline)
+	if remaining > compactTimeout || remaining < compactTimeout-time.Minute {
+		t.Fatalf("deadline in %v, want about %v", remaining, compactTimeout)
 	}
 }
 

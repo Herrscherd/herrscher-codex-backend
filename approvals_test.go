@@ -228,7 +228,7 @@ func TestReadTurnAnswersAnApprovalRequestMidTurn(t *testing.T) {
 	a := &approver{session: "api", ask: func(context.Context, string, []string) ([]byte, error) {
 		return []byte(`{"decision":"deny"}`), nil
 	}}
-	if _, err := readTurn(context.Background(), bufio.NewReader(strings.NewReader(lines)), nil, a,
+	if _, err := readTurn(context.Background(), bufio.NewReader(strings.NewReader(lines)), turnScope{}, nil, a,
 		func(m map[string]any) error { sent = append(sent, m); return nil }); err != nil {
 		t.Fatal(err)
 	}

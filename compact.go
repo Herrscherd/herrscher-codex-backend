@@ -1,13 +1,12 @@
 package codex
 
 import (
-	"bufio"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	contracts "github.com/Herrscherd/herrscher-contracts"
 )
@@ -19,10 +18,12 @@ const (
 	itemContextCompaction = "contextCompaction"
 	compactionTool        = "compaction"
 	compactNote           = "Contexte compacté par Codex, taille après compaction non mesurée."
+	compactTimeout        = 10 * time.Minute
 )
 
 var (
 	errCompactInstruction = errors.New("codex compaction takes no instruction: thread/compact/start has no field for one")
+	errCompactNoThread    = errors.New("codex compaction needs an open thread: no turn has run yet")
 	errCompactionRejected = errors.New("codex rejected the compaction")
 	errCompactionFailed   = errors.New("codex compaction turn failed")
 )
@@ -31,21 +32,41 @@ func (r *streamResponder) Compact(ctx context.Context, req contracts.CompactRequ
 	if strings.TrimSpace(req.Instruction) != "" {
 		return contracts.CompactResult{}, errCompactInstruction
 	}
+	ctx, cancel := compactDeadline(ctx)
+	defer cancel()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.sess == nil {
+		if r.resumeID == "" {
+			return contracts.CompactResult{}, errCompactNoThread
+		}
 		if err := r.open(ctx, r.resumeID); err != nil {
 			return contracts.CompactResult{}, fmt.Errorf("codex compaction: %w", err)
 		}
 	}
 	if err := r.sess.Compact(ctx, onEvent); err != nil {
+		if !errors.Is(err, errCompactionRejected) && !errors.Is(err, errCompactionFailed) {
+			r.dropSession()
+		}
 		return contracts.CompactResult{}, fmt.Errorf("codex compaction: %w", err)
 	}
 	return contracts.CompactResult{Note: compactNote}, nil
 }
 
+func compactDeadline(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, compactTimeout)
+}
+
+func (r *streamResponder) dropSession() {
+	r.resumeID = r.sess.threadID
+	if err := r.sess.Close(); err != nil {
+		slog.Warn("app-server session did not close cleanly after a lost compaction", "error", err)
+	}
+	r.sess = nil
+}
+
 func compactStartRequest(requestID int, thread string) map[string]any {
-	return map[string]any{"id": requestID, fieldMethod: methodCompactStart, fieldParams: map[string]any{fieldThreadID: thread}}
+	return map[string]any{fieldID: requestID, fieldMethod: methodCompactStart, fieldParams: map[string]any{fieldThreadID: thread}}
 }
 
 func (s *appSession) Compact(ctx context.Context, onEvent func(contracts.BackendEvent)) error {
@@ -61,84 +82,19 @@ func (s *appSession) Compact(ctx context.Context, onEvent func(contracts.Backend
 	if err := s.write(compactStartRequest(requestID, s.threadID)); err != nil {
 		return err
 	}
-	outcome := make(chan error, 1)
-	go func() {
-		outcome <- readCompaction(ctx, s.out, onEvent, s.approvalsIfGated, s.write)
-	}()
-	select {
-	case err := <-outcome:
+	turn, err := s.awaitTurn(ctx, turnScope{threadID: s.threadID, compaction: true}, onEvent)
+	if err != nil {
 		return err
-	case <-ctx.Done():
-		s.abort()
-		if readErr := <-outcome; readErr != nil {
-			slog.Debug("compaction ended with the aborted session", "error", readErr)
-		}
-		return ctx.Err()
 	}
-}
-
-func readCompaction(ctx context.Context, reader *bufio.Reader, onEvent func(contracts.BackendEvent), approvals *approver, respondHoldingSendLock func(map[string]any) error) error {
-	for {
-		line, err := reader.ReadBytes('\n')
-		if len(line) > 0 {
-			finished, handleErr := consumeCompactionLine(ctx, line, onEvent, approvals, respondHoldingSendLock)
-			if finished || handleErr != nil {
-				return handleErr
-			}
-		}
-		if err != nil {
-			return fmt.Errorf("codex read compaction: %w", err)
-		}
+	if turn.rejected {
+		return fmt.Errorf("%w: %s", errCompactionRejected, turn.ErrMsg)
 	}
-}
-
-func consumeCompactionLine(ctx context.Context, line []byte, onEvent func(contracts.BackendEvent), approvals *approver, respondHoldingSendLock func(map[string]any) error) (bool, error) {
-	var msg map[string]any
-	if err := json.Unmarshal(line, &msg); err != nil {
-		slog.Debug("skipping a line from codex that is not a JSON object", "error", err)
-		return false, nil
+	if turn.IsError {
+		return fmt.Errorf("%w: %s", errCompactionFailed, turn.ErrMsg)
 	}
-	if rpcErr, ok := msg[fieldError].(map[string]any); ok {
-		return true, rejectedCompaction(rpcErr)
-	}
-	if isServerRequest(msg) {
-		return false, answerApproval(ctx, msg, msg["id"], approvals, respondHoldingSendLock)
-	}
-	return handleCompactionNotification(msg, onEvent)
-}
-
-func rejectedCompaction(rpcErr map[string]any) error {
-	message := stringField(rpcErr, "message")
-	if message == "" {
-		message = "Codex rejected the compaction"
-	}
-	return fmt.Errorf("%w: %s", errCompactionRejected, message)
-}
-
-func handleCompactionNotification(msg map[string]any, onEvent func(contracts.BackendEvent)) (bool, error) {
-	params := mapField(msg, fieldParams)
-	switch stringField(msg, fieldMethod) {
-	case "item/started":
-		if isContextCompactionItem(mapField(params, "item")) && onEvent != nil {
-			onEvent(contracts.BackendEvent{Kind: "tool", Tool: compactionTool})
-		}
-	case "turn/completed":
-		turn := mapField(params, "turn")
-		if status := stringField(turn, fieldStatus); status == "failed" || status == statusError {
-			return true, fmt.Errorf("%w: %s", errCompactionFailed, stringField(turn, fieldError))
-		}
-		return true, nil
-	case "turn/failed":
-		return true, fmt.Errorf("%w: %s", errCompactionFailed, stringField(params, "message"))
-	case methodError:
-		if retry, ok := params["willRetry"].(bool); ok && retry {
-			return false, nil
-		}
-		return true, fmt.Errorf("%w: %s", errCompactionFailed, stringField(mapField(params, fieldError), "message"))
-	}
-	return false, nil
+	return nil
 }
 
 func isContextCompactionItem(item map[string]any) bool {
-	return stringField(item, "type") == itemContextCompaction
+	return stringField(item, fieldType) == itemContextCompaction
 }
