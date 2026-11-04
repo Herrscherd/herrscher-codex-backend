@@ -150,7 +150,7 @@ func TestDiscoverErrorCarriesBoundedStderr(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "no session token") {
 		t.Fatalf("err = %v, want the app-server stderr in it", err)
 	}
-	if len(err.Error()) > discoverStderrMax+512 {
+	if len(err.Error()) > 4096 {
 		t.Fatalf("error carries %d bytes, stderr is not bounded", len(err.Error()))
 	}
 }
