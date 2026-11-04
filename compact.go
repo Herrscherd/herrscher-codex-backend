@@ -18,21 +18,23 @@ const (
 	itemContextCompaction = "contextCompaction"
 	compactionTool        = "compaction"
 	compactNote           = "Contexte compacté par Codex, taille après compaction non mesurée."
-	compactTimeout        = 10 * time.Minute
+	envCompactTimeout     = "CODEX_COMPACT_TIMEOUT"
+	defaultCompactTimeout = 10 * time.Minute
 )
 
 var (
-	errCompactInstruction = errors.New("codex compaction takes no instruction: thread/compact/start has no field for one")
-	errCompactNoThread    = errors.New("codex compaction needs an open thread: no turn has run yet")
-	errCompactionRejected = errors.New("codex rejected the compaction")
-	errCompactionFailed   = errors.New("codex compaction turn failed")
+	errCompactTimeoutNotPositive = errors.New("a compaction timeout must be a positive duration")
+	errCompactInstruction        = errors.New("codex compaction takes no instruction: thread/compact/start has no field for one")
+	errCompactNoThread           = errors.New("codex compaction needs an open thread: no turn has run yet")
+	errCompactionRejected        = errors.New("codex rejected the compaction")
+	errCompactionFailed          = errors.New("codex compaction turn failed")
 )
 
 func (r *streamResponder) Compact(ctx context.Context, req contracts.CompactRequest, onEvent func(contracts.BackendEvent)) (contracts.CompactResult, error) {
 	if strings.TrimSpace(req.Instruction) != "" {
 		return contracts.CompactResult{}, errCompactInstruction
 	}
-	ctx, cancel := compactDeadline(ctx)
+	ctx, cancel := r.compactDeadline(ctx)
 	defer cancel()
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -53,8 +55,26 @@ func (r *streamResponder) Compact(ctx context.Context, req contracts.CompactRequ
 	return contracts.CompactResult{Note: compactNote}, nil
 }
 
-func compactDeadline(ctx context.Context) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(ctx, compactTimeout)
+func parseCompactTimeout(raw string) (time.Duration, error) {
+	if raw == "" {
+		return 0, nil
+	}
+	timeout, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("%s=%q: %w", envCompactTimeout, raw, err)
+	}
+	if timeout <= 0 {
+		return 0, fmt.Errorf("%s=%q: %w", envCompactTimeout, raw, errCompactTimeoutNotPositive)
+	}
+	return timeout, nil
+}
+
+func (r *streamResponder) compactDeadline(ctx context.Context) (context.Context, context.CancelFunc) {
+	timeout := r.compactTimeout
+	if timeout == 0 {
+		timeout = defaultCompactTimeout
+	}
+	return context.WithTimeout(ctx, timeout)
 }
 
 func (r *streamResponder) dropSession() {

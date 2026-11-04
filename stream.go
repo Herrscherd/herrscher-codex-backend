@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 
 	contracts "github.com/Herrscherd/herrscher-contracts"
 )
@@ -43,6 +44,7 @@ type streamResponder struct {
 	env                       map[string]string
 	gatewayHomeRemovedOnClose string
 	approvalsIfGated          *approver
+	compactTimeout            time.Duration
 	mu                        sync.Mutex
 	sess                      *appSession
 	tokenMu                   sync.Mutex

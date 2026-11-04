@@ -435,8 +435,8 @@ func TestCompactFailsWhenTheServerHangsUp(t *testing.T) {
 	}
 }
 
-func TestCompactTimeoutIsTenMinutes(t *testing.T) {
-	ctx, cancel := compactDeadline(t.Context())
+func TestCompactTimeoutIsTenMinutesByDefault(t *testing.T) {
+	ctx, cancel := (&streamResponder{}).compactDeadline(t.Context())
 	defer cancel()
 	deadline, ok := ctx.Deadline()
 	if !ok {
@@ -444,6 +444,99 @@ func TestCompactTimeoutIsTenMinutes(t *testing.T) {
 	}
 	if remaining := time.Until(deadline); remaining > 10*time.Minute || remaining < 10*time.Minute-time.Minute {
 		t.Fatalf("deadline in %v, want 10m", remaining)
+	}
+}
+
+func TestCompactTimeoutFollowsTheConfiguredDuration(t *testing.T) {
+	ctx, cancel := (&streamResponder{compactTimeout: 15 * time.Minute}).compactDeadline(t.Context())
+	defer cancel()
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("the compaction has no deadline")
+	}
+	if remaining := time.Until(deadline); remaining > 15*time.Minute || remaining < 15*time.Minute-time.Minute {
+		t.Fatalf("deadline in %v, want 15m", remaining)
+	}
+}
+
+func TestParseCompactTimeout(t *testing.T) {
+	cases := []struct {
+		name    string
+		raw     string
+		want    time.Duration
+		wantErr bool
+	}{
+		{name: "unset keeps the default", raw: ""},
+		{name: "a plain duration", raw: "15m", want: 15 * time.Minute},
+		{name: "a fractional duration", raw: "1.5h", want: 90 * time.Minute},
+		{name: "zero is refused", raw: "0", wantErr: true},
+		{name: "negative is refused", raw: "-5m", wantErr: true},
+		{name: "a word is refused", raw: "soon", wantErr: true},
+		{name: "a bare number without a unit is refused", raw: "600", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseCompactTimeout(tc.raw)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("parseCompactTimeout(%q) = %v, want error %t", tc.raw, err, tc.wantErr)
+			}
+			if err != nil && !strings.Contains(err.Error(), "CODEX_COMPACT_TIMEOUT") {
+				t.Fatalf("error %q does not name CODEX_COMPACT_TIMEOUT", err)
+			}
+			if got != tc.want {
+				t.Fatalf("parseCompactTimeout(%q) = %v, want %v", tc.raw, got, tc.want)
+			}
+		})
+	}
+}
+
+func resolveCodexSettings(t *testing.T, env map[string]string) contracts.PluginConfig {
+	t.Helper()
+	cfg, err := contracts.Resolve(backendPlugin(t).Manifest.Config, func(name string) string { return env[name] })
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	return cfg
+}
+
+func TestCompactTimeoutFromTheEnvironmentReachesTheResponder(t *testing.T) {
+	plugin := backendPlugin(t)
+	cfg := resolveCodexSettings(t, map[string]string{"CODEX_COMPACT_TIMEOUT": "15m"})
+	b, err := plugin.Backend(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("factory: %v", err)
+	}
+	responder, ok := b.(*streamResponder)
+	if !ok {
+		t.Fatalf("factory returned %T, want the stream responder", b)
+	}
+	if responder.compactTimeout != 15*time.Minute {
+		t.Fatalf("compactTimeout = %v, want 15m from CODEX_COMPACT_TIMEOUT", responder.compactTimeout)
+	}
+}
+
+func TestFactoryRefusesAnInvalidCompactTimeoutFromTheEnvironment(t *testing.T) {
+	plugin := backendPlugin(t)
+	for _, raw := range []string{"soon", "0", "-5m"} {
+		cfg := resolveCodexSettings(t, map[string]string{"CODEX_COMPACT_TIMEOUT": raw})
+		_, err := plugin.Backend(context.Background(), cfg)
+		if err == nil || !strings.Contains(err.Error(), "CODEX_COMPACT_TIMEOUT") {
+			t.Fatalf("CODEX_COMPACT_TIMEOUT=%q: factory error = %v, want a refusal naming CODEX_COMPACT_TIMEOUT", raw, err)
+		}
+	}
+}
+
+func TestNewBackendCarriesTheConfiguredCompactTimeout(t *testing.T) {
+	b, err := NewBackend(context.Background(), Config{Kind: "stream", CompactTimeout: 15 * time.Minute})
+	if err != nil {
+		t.Fatalf("NewBackend: %v", err)
+	}
+	responder, ok := b.(*streamResponder)
+	if !ok {
+		t.Fatalf("NewBackend returned %T, want the stream responder", b)
+	}
+	if responder.compactTimeout != 15*time.Minute {
+		t.Fatalf("compactTimeout = %v, want 15m", responder.compactTimeout)
 	}
 }
 
