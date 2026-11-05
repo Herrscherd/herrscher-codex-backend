@@ -101,6 +101,8 @@ type publishedPricing struct {
 func TestNativePricingFollowsPublishedTable(t *testing.T) {
 	want := map[string]publishedPricing{
 		"gpt-6-luna":    {input: 0.1, output: 0.5, cacheRead: 0.01, window: 1_050_000},
+		"gpt-6.1-sol":   {input: 2, output: 10, cacheRead: 0.1, window: 1_050_000},
+		"gpt-6.1-terra": {input: 1, output: 5, cacheRead: 0.05, window: 1_050_000},
 		"gpt-5.6-sol":   {input: 4, output: 20, cacheRead: 0.4, window: 1_050_000},
 		"gpt-5.6-terra": {input: 2, output: 12, cacheRead: 0.2, window: 1_050_000},
 		"gpt-5.6-luna":  {input: 0.2, output: 1.2, cacheRead: 0.02, window: 1_050_000},
@@ -130,15 +132,43 @@ func TestNativePricingFollowsPublishedTable(t *testing.T) {
 	}
 }
 
-func TestGatewayEntriesDeclareNoPricing(t *testing.T) {
+func TestGatewayEntriesMirrorTheirNativeTwin(t *testing.T) {
 	models := Models()
 	for index := range models {
-		spec := models[index]
-		if spec.Route != contracts.RouteGateway {
+		gateway := models[index]
+		if gateway.Route != contracts.RouteGateway {
 			continue
 		}
-		if spec.InputPrice != 0 || spec.OutputPrice != 0 || spec.CacheReadPrice != 0 || spec.CacheWritePrice != 0 || spec.ContextWindow != 0 {
-			t.Errorf("gateway model %q declares pricing or a window; those belong to the gateway and stay 0 here", spec.ID)
+		native, ok := nativeTwin(models, gateway.Arg)
+		if !ok {
+			t.Errorf("gateway model %q has no native twin with arg %q", gateway.ID, gateway.Arg)
+			continue
+		}
+		if gateway.InputPrice != native.InputPrice || gateway.OutputPrice != native.OutputPrice || gateway.CacheReadPrice != native.CacheReadPrice || gateway.CacheWritePrice != native.CacheWritePrice || gateway.ContextWindow != native.ContextWindow {
+			t.Errorf("gateway model %q does not mirror native %q: %+v versus %+v", gateway.ID, native.ID, gateway, native)
+		}
+	}
+}
+
+func nativeTwin(models []contracts.ModelSpec, arg string) (contracts.ModelSpec, bool) {
+	for index := range models {
+		if models[index].Route == contracts.RouteNative && models[index].Arg == arg {
+			return models[index], true
+		}
+	}
+	return contracts.ModelSpec{}, false
+}
+
+func TestGPT61EffortsFollowThePage(t *testing.T) {
+	want := []string{"low", "medium", "high", "xhigh", "max"}
+	for _, id := range []string{"gpt-6.1-sol", "gpt-6.1-terra"} {
+		spec, ok := findModel(id)
+		if !ok {
+			t.Errorf("model %q missing from the catalog", id)
+			continue
+		}
+		if !slices.Equal(spec.Efforts, want) {
+			t.Errorf("model %q efforts = %v, want exactly %v", id, spec.Efforts, want)
 		}
 	}
 }
