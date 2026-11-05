@@ -22,10 +22,24 @@ const (
 	defaultCompactTimeout = 10 * time.Minute
 )
 
+type compactUnavailableError struct {
+	reason string
+}
+
+var _ contracts.NoticeError = (*compactUnavailableError)(nil)
+
+func (e *compactUnavailableError) Error() string {
+	return "codex compaction unavailable: " + e.reason
+}
+
+func (e *compactUnavailableError) Notice() contracts.Notice {
+	return contracts.Notice{Code: contracts.CodeCompactUnavailable, Args: []contracts.Arg{contracts.Text("Reason", e.reason)}}
+}
+
 var (
-	errCompactTimeoutNotPositive = errors.New("a compaction timeout must be a positive duration")
-	errCompactInstruction        = errors.New("codex compaction takes no instruction: thread/compact/start has no field for one")
-	errCompactNoThread           = errors.New("codex compaction needs an open thread: no turn has run yet")
+	errCompactTimeoutNotPositive = &compactUnavailableError{reason: "a compaction timeout must be a positive duration"}
+	errCompactInstruction        = &compactUnavailableError{reason: "thread/compact/start takes no instruction, and the backend has no field for one"}
+	errCompactNoThread           = &compactUnavailableError{reason: "no turn has run yet, so there is no thread to compact"}
 	errCompactionRejected        = errors.New("codex rejected the compaction")
 	errCompactionFailed          = errors.New("codex compaction turn failed")
 )
@@ -52,7 +66,7 @@ func (r *streamResponder) Compact(ctx context.Context, req contracts.CompactRequ
 		}
 		return contracts.CompactResult{}, fmt.Errorf("codex compaction: %w", err)
 	}
-	return contracts.CompactResult{Note: compactNote}, nil
+	return contracts.CompactResult{Note: compactNote, Notice: contracts.Notice{Code: contracts.CodeCompacted}}, nil
 }
 
 func parseCompactTimeout(raw string) (time.Duration, error) {

@@ -5,12 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
 	"time"
 
 	contracts "github.com/Herrscherd/herrscher-contracts"
+	"github.com/Herrscherd/herrscher-contracts/i18n"
 )
 
 type compactPeer struct {
@@ -639,5 +641,77 @@ func TestCompactRefusesWhenTheOpenFails(t *testing.T) {
 	}()
 	if err == nil || !strings.Contains(err.Error(), "open refused") {
 		t.Fatalf("err=%v, want the open failure", err)
+	}
+}
+
+func TestCompactUnavailableNoticesCarryTheReasonAsText(t *testing.T) {
+	timeoutErr := mustCompactTimeoutError(t)
+	cases := []struct {
+		name string
+		err  error
+	}{
+		{"instruction", errCompactInstruction},
+		{"no thread", errCompactNoThread},
+		{"timeout not positive", timeoutErr},
+	}
+	renderer := contracts.NewRenderer()
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			notice := contracts.NoticeOf(tc.err)
+			if notice.Code != contracts.CodeCompactUnavailable {
+				t.Fatalf("code=%v, want CodeCompactUnavailable", notice.Code)
+			}
+			if len(notice.Args) != 1 || notice.Args[0].Name() != "Reason" || notice.Args[0].Kind() != contracts.ArgText {
+				t.Fatalf("args=%+v, want one text argument named Reason", notice.Args)
+			}
+			if _, err := renderer.Render(i18n.French, notice); err != nil {
+				t.Fatalf("Render: %v", err)
+			}
+		})
+	}
+}
+
+func mustCompactTimeoutError(t *testing.T) error {
+	t.Helper()
+	_, err := parseCompactTimeout("0")
+	if err == nil {
+		t.Fatal("parseCompactTimeout(\"0\") succeeded, want an error")
+	}
+	return err
+}
+
+func TestCompactRejectionAndFailureReachTheUserAsUnexpected(t *testing.T) {
+	cases := []struct {
+		name string
+		peer func(map[string]any) []map[string]any
+	}{
+		{"rejected request", func(request map[string]any) []map[string]any {
+			return []map[string]any{{"id": request["id"], "error": map[string]any{"message": "compaction refused"}}}
+		}},
+		{"failed turn", answerCompaction(turnEnded("failed", map[string]any{fieldMessage: "context overflow"}))},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			peer := newCompactPeer(t, tc.peer)
+			_, err := compactingResponder(peer).Compact(t.Context(), contracts.CompactRequest{}, nil)
+			notice := contracts.NoticeOf(err)
+			if notice.Code != contracts.CodeUnexpected {
+				t.Fatalf("code=%v, want CodeUnexpected", notice.Code)
+			}
+			if len(notice.Args) != 1 || notice.Args[0].Name() != "Detail" || !strings.Contains(fmt.Sprint(notice.Args[0].Value()), "codex") {
+				t.Fatalf("args=%+v, want the technical text as Detail", notice.Args)
+			}
+		})
+	}
+}
+
+func TestCompactedResultCarriesTheCompactedNotice(t *testing.T) {
+	peer := newCompactPeer(t, answerCompaction(completedTurn()))
+	got, err := compactingResponder(peer).Compact(t.Context(), contracts.CompactRequest{}, nil)
+	if err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	if got.Notice.Code != contracts.CodeCompacted || len(got.Notice.Args) != 0 {
+		t.Fatalf("notice=%+v, want CodeCompacted without arguments", got.Notice)
 	}
 }
