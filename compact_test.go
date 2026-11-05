@@ -680,26 +680,30 @@ func mustCompactTimeoutError(t *testing.T) error {
 	return err
 }
 
-func TestCompactRejectionAndFailureReachTheUserAsUnexpected(t *testing.T) {
+func TestCompactRejectionAndFailureReachTheUserAsUnavailable(t *testing.T) {
 	cases := []struct {
-		name string
-		peer func(map[string]any) []map[string]any
+		name  string
+		peer  func(map[string]any) []map[string]any
+		cause error
 	}{
 		{"rejected request", func(request map[string]any) []map[string]any {
 			return []map[string]any{{"id": request["id"], "error": map[string]any{"message": "compaction refused"}}}
-		}},
-		{"failed turn", answerCompaction(turnEnded("failed", map[string]any{fieldMessage: "context overflow"}))},
+		}, errCompactionRejected},
+		{"failed turn", answerCompaction(turnEnded("failed", map[string]any{fieldMessage: "context overflow"})), errCompactionFailed},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			peer := newCompactPeer(t, tc.peer)
 			_, err := compactingResponder(peer).Compact(t.Context(), contracts.CompactRequest{}, nil)
-			notice := contracts.NoticeOf(err)
-			if notice.Code != contracts.CodeUnexpected {
-				t.Fatalf("code=%v, want CodeUnexpected", notice.Code)
+			if !errors.Is(err, tc.cause) {
+				t.Fatalf("err=%v, want %v in its chain", err, tc.cause)
 			}
-			if len(notice.Args) != 1 || notice.Args[0].Name() != "Detail" || !strings.Contains(fmt.Sprint(notice.Args[0].Value()), "codex") {
-				t.Fatalf("args=%+v, want the technical text as Detail", notice.Args)
+			notice := contracts.NoticeOf(err)
+			if notice.Code != contracts.CodeCompactUnavailable {
+				t.Fatalf("code=%v, want CodeCompactUnavailable", notice.Code)
+			}
+			if len(notice.Args) != 1 || notice.Args[0].Name() != "Reason" || !strings.Contains(fmt.Sprint(notice.Args[0].Value()), "codex") {
+				t.Fatalf("args=%+v, want the technical text as Reason", notice.Args)
 			}
 		})
 	}

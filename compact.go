@@ -24,12 +24,17 @@ const (
 
 type compactUnavailableError struct {
 	reason string
+	cause  error
 }
 
 var _ contracts.NoticeError = (*compactUnavailableError)(nil)
 
 func (e *compactUnavailableError) Error() string {
 	return "codex compaction unavailable: " + e.reason
+}
+
+func (e *compactUnavailableError) Unwrap() error {
+	return e.cause
 }
 
 func (e *compactUnavailableError) Notice() contracts.Notice {
@@ -121,10 +126,10 @@ func (s *appSession) Compact(ctx context.Context, onEvent func(contracts.Backend
 		return err
 	}
 	if turn.rejected {
-		return fmt.Errorf("%w: %s", errCompactionRejected, turn.ErrMsg)
+		return &compactUnavailableError{reason: fmt.Sprintf("%s: %s", errCompactionRejected, turn.ErrMsg), cause: errCompactionRejected}
 	}
 	if turn.IsError {
-		return fmt.Errorf("%w: %s", errCompactionFailed, turn.ErrMsg)
+		return &compactUnavailableError{reason: fmt.Sprintf("%s: %s", errCompactionFailed, turn.ErrMsg), cause: errCompactionFailed}
 	}
 	return nil
 }
