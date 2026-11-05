@@ -160,7 +160,7 @@ func TestGPT61EffortsFollowThePage(t *testing.T) {
 	}
 }
 
-func TestRetiredAndSupersededModelsAreHidden(t *testing.T) {
+func TestRetiredUnservedAndSupersededModelsAreHidden(t *testing.T) {
 	hidden := map[string]bool{
 		"gpt-5.6-sol":    true,
 		"gpt-5-codex":    true,
@@ -168,6 +168,9 @@ func TestRetiredAndSupersededModelsAreHidden(t *testing.T) {
 		"o4-mini":        true,
 		"gw-gpt-5.6-sol": true,
 		"gw-gpt-5.5":     true,
+		"gpt-6-astra":    true,
+		"gpt-6.1-sol":    true,
+		"gpt-6.1-terra":  true,
 	}
 	models := Models()
 	for index := range models {

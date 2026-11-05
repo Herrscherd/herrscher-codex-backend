@@ -149,6 +149,15 @@ and the deprecations page (https://developers.openai.com/api/docs/deprecations),
 read in November 2026. The model list cached by the local codex CLI is not a
 source, so GPT-6 Astra and GPT-6.1 follow the same rule.
 
+Visibility is a separate rule. A native model is visible in the host's selector
+when the local `codex` login serves it, which is what `model/list` returns in
+`discover.go`. Otherwise it is `Hidden`. A static entry that the login does not
+serve would appear in the selector and fail when run, so it stays in the catalog
+(its prices and window are kept and it still resolves by `ID`) but is hidden.
+GPT-6 Astra, GPT-6.1 Sol and GPT-6.1 Terra are hidden for that reason: the login
+did not list them in `model/list`. `TestRetiredUnservedAndSupersededModelsAreHidden`
+pins them as hidden.
+
 Each native entry carries its price in USD per million tokens (input, cached
 input, 30-minute cache write, output) and its context window in tokens.
 
@@ -188,10 +197,12 @@ What the catalog does not model:
   medium, high, xhigh and max. The catalog keeps the five efforts shared with the
   other GPT-6 entries, so `none` cannot be selected through the host.
 
-Retired and superseded models are `Hidden`: gpt-5-codex and o4-mini (shut down),
-GPT-5.5 and GPT-5.6 Sol (absent from OpenAI's current model page), and the
-gateway duplicates `gw-gpt-5.5` and `gw-gpt-5.6-sol`. They stay in the catalog so
-a resumed session still finds its route by `ID`.
+Retired, unserved and superseded models are `Hidden`: gpt-5-codex and o4-mini
+(shut down), GPT-5.5 and GPT-5.6 Sol (absent from OpenAI's current model page),
+GPT-6 Astra and GPT-6.1 Sol and Terra (not served by the local login, see the
+visibility rule above), and the gateway duplicates `gw-gpt-5.5` and
+`gw-gpt-5.6-sol`. They stay in the catalog so a resumed session still finds its
+route by `ID`.
 
 ## The gateway route needs a config file
 
