@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	contracts "github.com/Herrscherd/herrscher-contracts"
 )
@@ -17,9 +18,10 @@ const (
 	methodCompactStart    = "thread/compact/start"
 	itemContextCompaction = "contextCompaction"
 	compactionTool        = "compaction"
-	compactNote           = "Contexte compacté par Codex, taille après compaction non mesurée."
+	compactNote           = "Context compacted by Codex, size after compaction not measured."
 	envCompactTimeout     = "CODEX_COMPACT_TIMEOUT"
 	defaultCompactTimeout = 10 * time.Minute
+	maxReasonRunes        = 200
 )
 
 type compactUnavailableError struct {
@@ -38,7 +40,16 @@ func (e *compactUnavailableError) Unwrap() error {
 }
 
 func (e *compactUnavailableError) Notice() contracts.Notice {
-	return contracts.Notice{Code: contracts.CodeCompactUnavailable, Args: []contracts.Arg{contracts.Text("Reason", e.reason)}}
+	return contracts.Notice{Code: contracts.CodeCompactUnavailable, Args: []contracts.Arg{contracts.Text("Reason", boundedReason(e.reason))}}
+}
+
+func boundedReason(cause string) string {
+	line, _, _ := strings.Cut(cause, "\n")
+	line = strings.TrimSpace(line)
+	if utf8.RuneCountInString(line) <= maxReasonRunes {
+		return line
+	}
+	return string([]rune(line)[:maxReasonRunes-1]) + "…"
 }
 
 var (

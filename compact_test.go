@@ -719,3 +719,44 @@ func TestCompactedResultCarriesTheCompactedNotice(t *testing.T) {
 		t.Fatalf("notice=%+v, want CodeCompacted without arguments", got.Notice)
 	}
 }
+
+func TestCompactedNoteIsEnglish(t *testing.T) {
+	peer := newCompactPeer(t, answerCompaction(completedTurn()))
+	got, err := compactingResponder(peer).Compact(t.Context(), contracts.CompactRequest{}, nil)
+	if err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	const want = "Context compacted by Codex, size after compaction not measured."
+	if got.Note != want {
+		t.Fatalf("note=%q, want %q", got.Note, want)
+	}
+}
+
+func TestUnavailableReasonIsTheFirstLineBoundedTo200Runes(t *testing.T) {
+	long := strings.Repeat("a", 300)
+	exact := strings.Repeat("é", 200)
+	cases := []struct {
+		name   string
+		cause  string
+		reason string
+	}{
+		{"several lines keep the first", "first line\nsecond line\nthird", "first line"},
+		{"a long line is cut with an ellipsis", long, strings.Repeat("a", 199) + "…"},
+		{"exactly 200 runes is kept whole", exact, exact},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := &compactUnavailableError{reason: tc.cause}
+			notice := err.Notice()
+			if notice.Code != contracts.CodeCompactUnavailable || len(notice.Args) != 1 {
+				t.Fatalf("notice=%+v, want compact.unavailable with one argument", notice)
+			}
+			if got := fmt.Sprint(notice.Args[0].Value()); got != tc.reason {
+				t.Fatalf("Reason=%q, want %q", got, tc.reason)
+			}
+			if !strings.Contains(err.Error(), tc.cause) {
+				t.Fatalf("Error() = %q, want the full cause kept", err.Error())
+			}
+		})
+	}
+}
