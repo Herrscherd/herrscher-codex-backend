@@ -180,6 +180,13 @@ The host aggregates `Manifest.Models` across the compiled backends
 (`herrscher models list`) and takes the choice as `session create --model`.
 Verify what a given install actually recognizes with `codex debug models`.
 
+## Windows process tree
+
+On Windows the child tree is stopped with `taskkill /T /F`, a snapshot taken at kill
+time. No Job Object is used, so a grandchild started after that snapshot, or one that
+detaches before it, can outlive the backend. The Windows CI job runs the discovery and
+kill tests only.
+
 ## Further reading
 
 - [Herrscher docs](https://github.com/Herrscherd/herrscher-docs), page
