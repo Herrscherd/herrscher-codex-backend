@@ -141,23 +141,30 @@ the `--model` argument and the effort axis where there is one.
 Most are route `native`, answered by the local `codex` login. A few `gw-*`
 entries are route `gateway`, served by the gateway's OpenAI-shaped facade.
 
-Each native entry carries its price in USD per million tokens (input, cached
-input, 30-minute cache write, output) and its context window in tokens, when
-OpenAI states them. The sources are OpenAI's model page
-(https://developers.openai.com/api/docs/models), its pricing page
-(https://developers.openai.com/api/docs/pricing) and its deprecations page
-(https://developers.openai.com/api/docs/deprecations), read in November 2026.
+One rule decides every native value: it is in the catalog when a public OpenAI page
+states it. The sources are OpenAI's models page
+(https://developers.openai.com/api/docs/models), each model's page under
+`/api/docs/models/<id>`, the pricing page (https://developers.openai.com/api/docs/pricing)
+and the deprecations page (https://developers.openai.com/api/docs/deprecations),
+read in November 2026. The model list cached by the local codex CLI is not a
+source, so GPT-6 Astra and GPT-6.1 follow the same rule.
 
-- A context window is set only where the model page states it: 1.05M tokens for
-  GPT-6 Luna, GPT-6.1 Sol and GPT-6.1 Terra. The model page gives no window for
-  GPT-5.5 or the GPT-5.6 models, so their window is 0, which means unknown.
-  Cursor's "Up to 1M" is Cursor's own limit, not OpenAI's, and is not used here.
+Each native entry carries its price in USD per million tokens (input, cached
+input, 30-minute cache write, output) and its context window in tokens.
+
+- The 30-minute cache write values are those of the short-context tier, 272K input
+  tokens or fewer, which is the tier the catalog models.
+- A context window is set only where a public page states it: 1.05M tokens for
+  GPT-6 Astra, GPT-6 Luna, GPT-6.1 Sol and GPT-6.1 Terra, 400K for gpt-5-codex, and
+  200K for o4-mini. GPT-5.5 and the GPT-5.6 models have no window on OpenAI's pages,
+  so their window is 0, which means unknown. Cursor's "Up to 1M" is Cursor's own
+  limit, not OpenAI's, and is not used here.
 - The cache write is the 30-minute write, which is the only write price OpenAI
   lists for these models. GPT-5.5 has no write price on the pricing page, so its
   `CacheWritePrice` is 0.
 - gpt-5-codex and o4-mini were shut down by OpenAI on 23 July 2026 and 23 October
-  2026. Neither their deprecation entry nor their pricing states a price or a
-  window, so both stay at 0.
+  2026. Their model pages still state a price and a window beside the "Shut down"
+  status, so those values are kept and both entries are `Hidden`.
 
 Gateway entries (`gw-*`) carry no price. The gateway route bills at our price,
 not OpenAI's (see the `InputPrice` contract on `ModelSpec`), and our gateway price
@@ -180,10 +187,6 @@ What the catalog does not model:
 - The `none` reasoning effort of GPT-6.1 Terra. The page lists it next to low,
   medium, high, xhigh and max. The catalog keeps the five efforts shared with the
   other GPT-6 entries, so `none` cannot be selected through the host.
-- GPT-6 Astra (`gpt-6-astra`). OpenAI's model page lists it at 1.05M tokens, with
-  $10 input, $1 cached input, $50 output and a 30-minute cache write of $12.50. It
-  is not in the catalog because the model list that the codex CLI caches on this
-  machine does not serve it. It will be added when codex serves it.
 
 Retired and superseded models are `Hidden`: gpt-5-codex and o4-mini (shut down),
 GPT-5.5 and GPT-5.6 Sol (absent from OpenAI's current model page), and the

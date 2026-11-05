@@ -100,15 +100,16 @@ type publishedPricing struct {
 
 func TestNativePricingFollowsPublishedTable(t *testing.T) {
 	want := map[string]publishedPricing{
+		"gpt-6-astra":   {input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5, window: 1_050_000},
 		"gpt-6-luna":    {input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125, window: 1_050_000},
 		"gpt-6.1-sol":   {input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5, window: 1_050_000},
 		"gpt-6.1-terra": {input: 1, output: 5, cacheRead: 0.05, cacheWrite: 1.25, window: 1_050_000},
 		"gpt-5.6-sol":   {input: 4, output: 20, cacheRead: 0.4, cacheWrite: 5},
 		"gpt-5.6-terra": {input: 2, output: 12, cacheRead: 0.2, cacheWrite: 2.5},
 		"gpt-5.6-luna":  {input: 0.2, output: 1.2, cacheRead: 0.02, cacheWrite: 0.25},
-		"gpt-5-codex":   {},
+		"gpt-5-codex":   {input: 1.25, output: 10, cacheRead: 0.125, window: 400_000},
 		"gpt-5.5":       {input: 5, output: 30, cacheRead: 0.5},
-		"o4-mini":       {},
+		"o4-mini":       {input: 1.1, output: 4.4, cacheRead: 0.275, window: 200_000},
 	}
 	models := Models()
 	for index := range models {
