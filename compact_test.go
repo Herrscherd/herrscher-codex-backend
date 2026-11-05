@@ -698,7 +698,7 @@ func TestUnavailableReasonIsTheFirstLineBoundedTo200Runes(t *testing.T) {
 	}
 }
 
-func requireUnavailable(t *testing.T, err error, cause error, reason string) {
+func requireUnavailable(t *testing.T, err, cause error, reason string) {
 	t.Helper()
 	if !errors.Is(err, cause) {
 		t.Fatalf("err=%v, want %v in its chain", err, cause)
