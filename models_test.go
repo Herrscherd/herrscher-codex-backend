@@ -173,6 +173,15 @@ func TestRetiredUnservedAndSupersededModelsAreHidden(t *testing.T) {
 		"gpt-6.1-terra":  true,
 	}
 	models := Models()
+	known := make(map[string]bool, len(models))
+	for index := range models {
+		known[models[index].ID] = true
+	}
+	for id := range hidden {
+		if !known[id] {
+			t.Errorf("hidden table names %q, which is not in the catalog", id)
+		}
+	}
 	for index := range models {
 		spec := models[index]
 		if spec.Hidden != hidden[spec.ID] {

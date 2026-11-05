@@ -155,8 +155,9 @@ when the local `codex` login serves it, which is what `model/list` returns in
 serve would appear in the selector and fail when run, so it stays in the catalog
 (its prices and window are kept and it still resolves by `ID`) but is hidden.
 GPT-6 Astra, GPT-6.1 Sol and GPT-6.1 Terra are hidden for that reason: the login
-did not list them in `model/list`. `TestRetiredUnservedAndSupersededModelsAreHidden`
-pins them as hidden.
+did not list them in `model/list`. GPT-5.6 Sol is hidden for the same reason, since
+the login does not serve it either. `TestRetiredUnservedAndSupersededModelsAreHidden`
+pins all of them as hidden.
 
 Each native entry carries its price in USD per million tokens (input, cached
 input, 30-minute cache write, output) and its context window in tokens.
