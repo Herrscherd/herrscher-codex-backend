@@ -702,7 +702,7 @@ func withAttachments(text string, paths []string) string {
 	}
 	lines := make([]string, len(paths))
 	for i, p := range paths {
-		lines[i] = "[Image jointe : " + p + "]"
+		lines[i] = "[Attached image: " + p + "]"
 	}
 	attachments := strings.Join(lines, "\n")
 	if text == "" {
