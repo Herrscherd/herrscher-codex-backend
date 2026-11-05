@@ -732,3 +732,14 @@ func TestRespondReturnsItsTextWithoutAnEventSink(t *testing.T) {
 		t.Fatalf("got %q, %v; want the text without a sink", got, err)
 	}
 }
+
+func TestWithAttachmentsMarksEachImageInEnglish(t *testing.T) {
+	if got := withAttachments("hello", nil); got != "hello" {
+		t.Fatalf("no attachments should pass text through, got %q", got)
+	}
+	got := withAttachments("look", []string{"/tmp/a.png", "/tmp/b.png"})
+	want := "look\n\n[Attached image: /tmp/a.png]\n[Attached image: /tmp/b.png]"
+	if got != want {
+		t.Fatalf("withAttachments = %q, want %q", got, want)
+	}
+}
