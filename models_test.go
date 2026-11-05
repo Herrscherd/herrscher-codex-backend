@@ -94,21 +94,21 @@ func findModel(id string) (contracts.ModelSpec, bool) {
 }
 
 type publishedPricing struct {
-	input, output, cacheRead float64
-	window                   int
+	input, output, cacheRead, cacheWrite float64
+	window                               int
 }
 
 func TestNativePricingFollowsPublishedTable(t *testing.T) {
 	want := map[string]publishedPricing{
-		"gpt-6-luna":    {input: 0.1, output: 0.5, cacheRead: 0.01, window: 1_050_000},
-		"gpt-6.1-sol":   {input: 2, output: 10, cacheRead: 0.1, window: 1_050_000},
-		"gpt-6.1-terra": {input: 1, output: 5, cacheRead: 0.05, window: 1_050_000},
-		"gpt-5.6-sol":   {input: 4, output: 20, cacheRead: 0.4, window: 1_050_000},
-		"gpt-5.6-terra": {input: 2, output: 12, cacheRead: 0.2, window: 1_050_000},
-		"gpt-5.6-luna":  {input: 0.2, output: 1.2, cacheRead: 0.02, window: 1_050_000},
-		"gpt-5-codex":   {input: 1.25, output: 10, cacheRead: 0.125, window: 400_000},
-		"gpt-5.5":       {input: 5, output: 30, cacheRead: 0.5, window: 1_050_000},
-		"o4-mini":       {input: 1.1, output: 4.4, cacheRead: 0.275, window: 200_000},
+		"gpt-6-luna":    {input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125, window: 1_050_000},
+		"gpt-6.1-sol":   {input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5, window: 1_050_000},
+		"gpt-6.1-terra": {input: 1, output: 5, cacheRead: 0.05, cacheWrite: 1.25, window: 1_050_000},
+		"gpt-5.6-sol":   {input: 4, output: 20, cacheRead: 0.4, cacheWrite: 5},
+		"gpt-5.6-terra": {input: 2, output: 12, cacheRead: 0.2, cacheWrite: 2.5},
+		"gpt-5.6-luna":  {input: 0.2, output: 1.2, cacheRead: 0.02, cacheWrite: 0.25},
+		"gpt-5-codex":   {},
+		"gpt-5.5":       {input: 5, output: 30, cacheRead: 0.5},
+		"o4-mini":       {},
 	}
 	models := Models()
 	for index := range models {
@@ -121,7 +121,7 @@ func TestNativePricingFollowsPublishedTable(t *testing.T) {
 			t.Errorf("native model %q has no published pricing in the test table", spec.ID)
 			continue
 		}
-		got := publishedPricing{spec.InputPrice, spec.OutputPrice, spec.CacheReadPrice, spec.ContextWindow}
+		got := publishedPricing{spec.InputPrice, spec.OutputPrice, spec.CacheReadPrice, spec.CacheWritePrice, spec.ContextWindow}
 		if got != price {
 			t.Errorf("model %q pricing = %+v, published %+v", spec.ID, got, price)
 		}
@@ -132,31 +132,17 @@ func TestNativePricingFollowsPublishedTable(t *testing.T) {
 	}
 }
 
-func TestGatewayEntriesMirrorTheirNativeTwin(t *testing.T) {
+func TestGatewayEntriesCarryNoPrice(t *testing.T) {
 	models := Models()
 	for index := range models {
 		gateway := models[index]
 		if gateway.Route != contracts.RouteGateway {
 			continue
 		}
-		native, ok := nativeTwin(models, gateway.Arg)
-		if !ok {
-			t.Errorf("gateway model %q has no native twin with arg %q", gateway.ID, gateway.Arg)
-			continue
-		}
-		if gateway.InputPrice != native.InputPrice || gateway.OutputPrice != native.OutputPrice || gateway.CacheReadPrice != native.CacheReadPrice || gateway.CacheWritePrice != native.CacheWritePrice || gateway.ContextWindow != native.ContextWindow {
-			t.Errorf("gateway model %q does not mirror native %q: %+v versus %+v", gateway.ID, native.ID, gateway, native)
+		if gateway.InputPrice != 0 || gateway.OutputPrice != 0 || gateway.CacheReadPrice != 0 || gateway.CacheWritePrice != 0 {
+			t.Errorf("gateway model %q declares a price; the gateway price is ours and is not published in this catalog", gateway.ID)
 		}
 	}
-}
-
-func nativeTwin(models []contracts.ModelSpec, arg string) (contracts.ModelSpec, bool) {
-	for index := range models {
-		if models[index].Route == contracts.RouteNative && models[index].Arg == arg {
-			return models[index], true
-		}
-	}
-	return contracts.ModelSpec{}, false
 }
 
 func TestGPT61EffortsFollowThePage(t *testing.T) {

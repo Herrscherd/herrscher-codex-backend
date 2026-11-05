@@ -142,16 +142,37 @@ Most are route `native`, answered by the local `codex` login. A few `gw-*`
 entries are route `gateway`, served by the gateway's OpenAI-shaped facade.
 
 Each native entry carries its price in USD per million tokens (input, cached
-input, output) and its context window in tokens. The values come from OpenAI's
-model pages (https://developers.openai.com/api/docs/models) and pricing page
-(https://developers.openai.com/api/docs/pricing). Codex publishes no 5-minute or
-1-hour cache write price, so `CacheWritePrice` stays 0 for every entry.
+input, 30-minute cache write, output) and its context window in tokens, when
+OpenAI states them. The sources are OpenAI's model page
+(https://developers.openai.com/api/docs/models), its pricing page
+(https://developers.openai.com/api/docs/pricing) and its deprecations page
+(https://developers.openai.com/api/docs/deprecations), read in November 2026.
+
+- A context window is set only where the model page states it: 1.05M tokens for
+  GPT-6 Luna, GPT-6.1 Sol and GPT-6.1 Terra. The model page gives no window for
+  GPT-5.5 or the GPT-5.6 models, so their window is 0, which means unknown.
+  Cursor's "Up to 1M" is Cursor's own limit, not OpenAI's, and is not used here.
+- The cache write is the 30-minute write, which is the only write price OpenAI
+  lists for these models. GPT-5.5 has no write price on the pricing page, so its
+  `CacheWritePrice` is 0.
+- gpt-5-codex and o4-mini were shut down by OpenAI on 23 July 2026 and 23 October
+  2026. Neither their deprecation entry nor their pricing states a price or a
+  window, so both stay at 0.
+
+Gateway entries (`gw-*`) carry no price. The gateway route bills at our price,
+not OpenAI's (see the `InputPrice` contract on `ModelSpec`), and our gateway price
+is not published in this catalog. Copying the native list price would show a
+price that is not ours. For the same reason their window is 0: the native windows
+of GPT-5.5 and GPT-5.6 are not published, so nothing is copied.
 
 What the catalog does not model:
 
 - The short-context tier. OpenAI's pricing is the standard tier up to 272K input
   tokens. A request above that pays a higher rate, which the contract cannot
   express, so the catalog understates the cost of long requests.
+- The 12-hour cache write (OpenAI lists it at twice the 30-minute write for the
+  GPT-6 and GPT-5.6 models). The contract has one cache write field, so only the
+  30-minute write is stored.
 - The GPT-5.6 Sol promotion. OpenAI states that its promotional pricing (the
   $4 input, $0.40 cached input, $20 output in the catalog) is available until
   30 November 2026. The page gives no price after that date, so the entry must be
@@ -159,18 +180,15 @@ What the catalog does not model:
 - The `none` reasoning effort of GPT-6.1 Terra. The page lists it next to low,
   medium, high, xhigh and max. The catalog keeps the five efforts shared with the
   other GPT-6 entries, so `none` cannot be selected through the host.
-- GPT-6 Astra (`gpt-6-astra`), which the models page lists at 1.05M tokens with
-  $10 input and $50 output. It is not in the catalog.
+- GPT-6 Astra (`gpt-6-astra`). OpenAI's model page lists it at 1.05M tokens, with
+  $10 input, $1 cached input, $50 output and a 30-minute cache write of $12.50. It
+  is not in the catalog because the model list that the codex CLI caches on this
+  machine does not serve it. It will be added when codex serves it.
 
-Gateway entries (`gw-*`) copy the price and window of the native entry with the
-same `Arg`, because the gateway route carries our prices and the same model
-carries the same list price. These are assumptions, not checked against the
-gateway's own tariff.
-
-Retired models (gpt-5-codex and o4-mini, both shown as shut down by OpenAI) and
-models superseded by a newer generation (GPT-5.5, GPT-5.6 Sol and their gateway
-duplicates) are `Hidden`. They stay in the catalog so a resumed session still
-finds its route by `ID`.
+Retired and superseded models are `Hidden`: gpt-5-codex and o4-mini (shut down),
+GPT-5.5 and GPT-5.6 Sol (absent from OpenAI's current model page), and the
+gateway duplicates `gw-gpt-5.5` and `gw-gpt-5.6-sol`. They stay in the catalog so
+a resumed session still finds its route by `ID`.
 
 ## The gateway route needs a config file
 
