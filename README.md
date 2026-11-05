@@ -139,8 +139,71 @@ read the catalog without instantiating the backend. Entries carry an id, a label
 the `--model` argument and the effort axis where there is one.
 
 Most are route `native`, answered by the local `codex` login. A few `gw-*`
-entries are route `gateway`, served by the gateway's OpenAI-shaped facade. Prices
-are left at 0, meaning unknown.
+entries are route `gateway`, served by the gateway's OpenAI-shaped facade.
+
+One rule decides every native value: it is in the catalog when a public OpenAI page
+states it. The sources are OpenAI's models page
+(https://developers.openai.com/api/docs/models), each model's page under
+`/api/docs/models/<id>`, the pricing page (https://developers.openai.com/api/docs/pricing)
+and the deprecations page (https://developers.openai.com/api/docs/deprecations),
+read in November 2026. The model list cached by the local codex CLI is not a
+source, so GPT-6 Astra and GPT-6.1 follow the same rule.
+
+Visibility is a separate rule. A native model is visible in the host's selector
+when the local `codex` login serves it, which is what `model/list` returns in
+`discover.go`. Otherwise it is `Hidden`. A static entry that the login does not
+serve would appear in the selector and fail when run, so it stays in the catalog
+(its prices and window are kept and it still resolves by `ID`) but is hidden.
+GPT-6 Astra, GPT-6.1 Sol and GPT-6.1 Terra are hidden for that reason: the login
+did not list them in `model/list`. GPT-5.6 Sol is hidden for the same reason, since
+the login does not serve it either. `TestRetiredUnservedAndSupersededModelsAreHidden`
+pins all of them as hidden.
+
+Each native entry carries its price in USD per million tokens (input, cached
+input, 30-minute cache write, output) and its context window in tokens.
+
+- The 30-minute cache write values are those of the short-context tier, 272K input
+  tokens or fewer, which is the tier the catalog models.
+- A context window is set only where a public page states it: 1.05M tokens for
+  GPT-6 Astra, GPT-6 Luna, GPT-6.1 Sol and GPT-6.1 Terra, 400K for gpt-5-codex, and
+  200K for o4-mini. GPT-5.5 and the GPT-5.6 models have no window on OpenAI's pages,
+  so their window is 0, which means unknown. Cursor's "Up to 1M" is Cursor's own
+  limit, not OpenAI's, and is not used here.
+- The cache write is the 30-minute write, which is the only write price OpenAI
+  lists for these models. GPT-5.5 has no write price on the pricing page, so its
+  `CacheWritePrice` is 0.
+- gpt-5-codex and o4-mini were shut down by OpenAI on 23 July 2026 and 23 October
+  2026. Their model pages still state a price and a window beside the "Shut down"
+  status, so those values are kept and both entries are `Hidden`.
+
+Gateway entries (`gw-*`) carry no price. The gateway route bills at our price,
+not OpenAI's (see the `InputPrice` contract on `ModelSpec`), and our gateway price
+is not published in this catalog. Copying the native list price would show a
+price that is not ours. For the same reason their window is 0: the native windows
+of GPT-5.5 and GPT-5.6 are not published, so nothing is copied.
+
+What the catalog does not model:
+
+- The short-context tier. OpenAI's pricing is the standard tier up to 272K input
+  tokens. A request above that pays a higher rate, which the contract cannot
+  express, so the catalog understates the cost of long requests.
+- The 12-hour cache write (OpenAI lists it at twice the 30-minute write for the
+  GPT-6 and GPT-5.6 models). The contract has one cache write field, so only the
+  30-minute write is stored.
+- The GPT-5.6 Sol promotion. OpenAI states that its promotional pricing (the
+  $4 input, $0.40 cached input, $20 output in the catalog) is available until
+  30 November 2026. The page gives no price after that date, so the entry must be
+  updated once OpenAI publishes it.
+- The `none` reasoning effort of GPT-6.1 Terra. The page lists it next to low,
+  medium, high, xhigh and max. The catalog keeps the five efforts shared with the
+  other GPT-6 entries, so `none` cannot be selected through the host.
+
+Retired, unserved and superseded models are `Hidden`: gpt-5-codex and o4-mini
+(shut down), GPT-5.5 and GPT-5.6 Sol (absent from OpenAI's current model page),
+GPT-6 Astra and GPT-6.1 Sol and Terra (not served by the local login, see the
+visibility rule above), and the gateway duplicates `gw-gpt-5.5` and
+`gw-gpt-5.6-sol`. They stay in the catalog so a resumed session still finds its
+route by `ID`.
 
 ## The gateway route needs a config file
 

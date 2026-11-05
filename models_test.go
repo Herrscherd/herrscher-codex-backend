@@ -15,8 +15,9 @@ func TestModelsAreValid(t *testing.T) {
 
 func TestGatewayModelsExist(t *testing.T) {
 	var n int
-	for _, m := range Models() {
-		if m.Route == contracts.RouteGateway {
+	models := Models()
+	for index := range models {
+		if models[index].Route == contracts.RouteGateway {
 			n++
 		}
 	}
@@ -83,10 +84,108 @@ func TestGPT6LunaFamilyEffortsAreExact(t *testing.T) {
 }
 
 func findModel(id string) (contracts.ModelSpec, bool) {
-	for _, spec := range Models() {
-		if spec.ID == id {
-			return spec, true
+	models := Models()
+	for index := range models {
+		if models[index].ID == id {
+			return models[index], true
 		}
 	}
 	return contracts.ModelSpec{}, false
+}
+
+type publishedPricing struct {
+	input, output, cacheRead, cacheWrite float64
+	window                               int
+}
+
+func TestNativePricingFollowsPublishedTable(t *testing.T) {
+	want := map[string]publishedPricing{
+		"gpt-6-astra":   {input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5, window: 1_050_000},
+		"gpt-6-luna":    {input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125, window: 1_050_000},
+		"gpt-6.1-sol":   {input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5, window: 1_050_000},
+		"gpt-6.1-terra": {input: 1, output: 5, cacheRead: 0.05, cacheWrite: 1.25, window: 1_050_000},
+		"gpt-5.6-sol":   {input: 4, output: 20, cacheRead: 0.4, cacheWrite: 5},
+		"gpt-5.6-terra": {input: 2, output: 12, cacheRead: 0.2, cacheWrite: 2.5},
+		"gpt-5.6-luna":  {input: 0.2, output: 1.2, cacheRead: 0.02, cacheWrite: 0.25},
+		"gpt-5-codex":   {input: 1.25, output: 10, cacheRead: 0.125, window: 400_000},
+		"gpt-5.5":       {input: 5, output: 30, cacheRead: 0.5},
+		"o4-mini":       {input: 1.1, output: 4.4, cacheRead: 0.275, window: 200_000},
+	}
+	models := Models()
+	for index := range models {
+		spec := models[index]
+		if spec.Route != contracts.RouteNative {
+			continue
+		}
+		price, ok := want[spec.ID]
+		if !ok {
+			t.Errorf("native model %q has no published pricing in the test table", spec.ID)
+			continue
+		}
+		got := publishedPricing{spec.InputPrice, spec.OutputPrice, spec.CacheReadPrice, spec.CacheWritePrice, spec.ContextWindow}
+		if got != price {
+			t.Errorf("model %q pricing = %+v, published %+v", spec.ID, got, price)
+		}
+		delete(want, spec.ID)
+	}
+	for id := range want {
+		t.Errorf("published model %q missing from the native catalog", id)
+	}
+}
+
+func TestGatewayEntriesCarryNoPrice(t *testing.T) {
+	models := Models()
+	for index := range models {
+		gateway := models[index]
+		if gateway.Route != contracts.RouteGateway {
+			continue
+		}
+		if gateway.InputPrice != 0 || gateway.OutputPrice != 0 || gateway.CacheReadPrice != 0 || gateway.CacheWritePrice != 0 {
+			t.Errorf("gateway model %q declares a price; the gateway price is ours and is not published in this catalog", gateway.ID)
+		}
+	}
+}
+
+func TestGPT61EffortsFollowThePage(t *testing.T) {
+	want := []string{"low", "medium", "high", "xhigh", "max"}
+	for _, id := range []string{"gpt-6.1-sol", "gpt-6.1-terra"} {
+		spec, ok := findModel(id)
+		if !ok {
+			t.Errorf("model %q missing from the catalog", id)
+			continue
+		}
+		if !slices.Equal(spec.Efforts, want) {
+			t.Errorf("model %q efforts = %v, want exactly %v", id, spec.Efforts, want)
+		}
+	}
+}
+
+func TestRetiredUnservedAndSupersededModelsAreHidden(t *testing.T) {
+	hidden := map[string]bool{
+		"gpt-5.6-sol":    true,
+		"gpt-5-codex":    true,
+		"gpt-5.5":        true,
+		"o4-mini":        true,
+		"gw-gpt-5.6-sol": true,
+		"gw-gpt-5.5":     true,
+		"gpt-6-astra":    true,
+		"gpt-6.1-sol":    true,
+		"gpt-6.1-terra":  true,
+	}
+	models := Models()
+	known := make(map[string]bool, len(models))
+	for index := range models {
+		known[models[index].ID] = true
+	}
+	for id := range hidden {
+		if !known[id] {
+			t.Errorf("hidden table names %q, which is not in the catalog", id)
+		}
+	}
+	for index := range models {
+		spec := models[index]
+		if spec.Hidden != hidden[spec.ID] {
+			t.Errorf("model %q hidden = %v, want %v", spec.ID, spec.Hidden, hidden[spec.ID])
+		}
+	}
 }

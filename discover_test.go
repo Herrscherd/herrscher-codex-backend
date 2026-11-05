@@ -368,3 +368,13 @@ func answerModelList(out *os.File, mode, request string) {
 	reply(out, `{"method":"notice","params":{}}`)
 	reply(out, `{"id":1,"result":{"data":[{"model":"gpt-7","displayName":"GPT-7","hidden":false,"supportedReasoningEfforts":[{"reasoningEffort":"low"},{"reasoningEffort":"high"}]},{"model":"gpt-secret","displayName":"Hidden","hidden":true,"supportedReasoningEfforts":[]}],"nextCursor":"next"}}`)
 }
+
+func TestDiscoveredCodexModelsCarryNoWindow(t *testing.T) {
+	specs := specsFromCodex([]codexModel{{Model: "gpt-7", DisplayName: "GPT-7"}})
+	if len(specs) != 1 {
+		t.Fatalf("specs = %d, want 1", len(specs))
+	}
+	if specs[0].ContextWindow != 0 || specs[0].InputPrice != 0 {
+		t.Fatalf("discovered spec carries window %d and price %v; the app-server does not publish them", specs[0].ContextWindow, specs[0].InputPrice)
+	}
+}
