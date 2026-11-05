@@ -15,8 +15,9 @@ func TestModelsAreValid(t *testing.T) {
 
 func TestGatewayModelsExist(t *testing.T) {
 	var n int
-	for _, m := range Models() {
-		if m.Route == contracts.RouteGateway {
+	models := Models()
+	for index := range models {
+		if models[index].Route == contracts.RouteGateway {
 			n++
 		}
 	}
@@ -83,10 +84,79 @@ func TestGPT6LunaFamilyEffortsAreExact(t *testing.T) {
 }
 
 func findModel(id string) (contracts.ModelSpec, bool) {
-	for _, spec := range Models() {
-		if spec.ID == id {
-			return spec, true
+	models := Models()
+	for index := range models {
+		if models[index].ID == id {
+			return models[index], true
 		}
 	}
 	return contracts.ModelSpec{}, false
+}
+
+type publishedPricing struct {
+	input, output, cacheRead float64
+	window                   int
+}
+
+func TestNativePricingFollowsPublishedTable(t *testing.T) {
+	want := map[string]publishedPricing{
+		"gpt-6-luna":    {input: 0.1, output: 0.5, cacheRead: 0.01, window: 1_050_000},
+		"gpt-5.6-sol":   {input: 4, output: 20, cacheRead: 0.4, window: 1_050_000},
+		"gpt-5.6-terra": {input: 2, output: 12, cacheRead: 0.2, window: 1_050_000},
+		"gpt-5.6-luna":  {input: 0.2, output: 1.2, cacheRead: 0.02, window: 1_050_000},
+		"gpt-5-codex":   {input: 1.25, output: 10, cacheRead: 0.125, window: 400_000},
+		"gpt-5.5":       {input: 5, output: 30, cacheRead: 0.5, window: 1_050_000},
+		"o4-mini":       {input: 1.1, output: 4.4, cacheRead: 0.275, window: 200_000},
+	}
+	models := Models()
+	for index := range models {
+		spec := models[index]
+		if spec.Route != contracts.RouteNative {
+			continue
+		}
+		price, ok := want[spec.ID]
+		if !ok {
+			t.Errorf("native model %q has no published pricing in the test table", spec.ID)
+			continue
+		}
+		got := publishedPricing{spec.InputPrice, spec.OutputPrice, spec.CacheReadPrice, spec.ContextWindow}
+		if got != price {
+			t.Errorf("model %q pricing = %+v, published %+v", spec.ID, got, price)
+		}
+		delete(want, spec.ID)
+	}
+	for id := range want {
+		t.Errorf("published model %q missing from the native catalog", id)
+	}
+}
+
+func TestGatewayEntriesDeclareNoPricing(t *testing.T) {
+	models := Models()
+	for index := range models {
+		spec := models[index]
+		if spec.Route != contracts.RouteGateway {
+			continue
+		}
+		if spec.InputPrice != 0 || spec.OutputPrice != 0 || spec.CacheReadPrice != 0 || spec.CacheWritePrice != 0 || spec.ContextWindow != 0 {
+			t.Errorf("gateway model %q declares pricing or a window; those belong to the gateway and stay 0 here", spec.ID)
+		}
+	}
+}
+
+func TestRetiredAndSupersededModelsAreHidden(t *testing.T) {
+	hidden := map[string]bool{
+		"gpt-5.6-sol":    true,
+		"gpt-5-codex":    true,
+		"gpt-5.5":        true,
+		"o4-mini":        true,
+		"gw-gpt-5.6-sol": true,
+		"gw-gpt-5.5":     true,
+	}
+	models := Models()
+	for index := range models {
+		spec := models[index]
+		if spec.Hidden != hidden[spec.ID] {
+			t.Errorf("model %q hidden = %v, want %v", spec.ID, spec.Hidden, hidden[spec.ID])
+		}
+	}
 }
