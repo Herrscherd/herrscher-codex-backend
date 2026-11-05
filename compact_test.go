@@ -644,71 +644,6 @@ func TestCompactRefusesWhenTheOpenFails(t *testing.T) {
 	}
 }
 
-func TestCompactUnavailableNoticesCarryTheReasonAsText(t *testing.T) {
-	timeoutErr := mustCompactTimeoutError(t)
-	cases := []struct {
-		name string
-		err  error
-	}{
-		{"instruction", errCompactInstruction},
-		{"no thread", errCompactNoThread},
-		{"timeout not positive", timeoutErr},
-	}
-	renderer := contracts.NewRenderer()
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			notice := contracts.NoticeOf(tc.err)
-			if notice.Code != contracts.CodeCompactUnavailable {
-				t.Fatalf("code=%v, want CodeCompactUnavailable", notice.Code)
-			}
-			if len(notice.Args) != 1 || notice.Args[0].Name() != "Reason" || notice.Args[0].Kind() != contracts.ArgText {
-				t.Fatalf("args=%+v, want one text argument named Reason", notice.Args)
-			}
-			if _, err := renderer.Render(i18n.French, notice); err != nil {
-				t.Fatalf("Render: %v", err)
-			}
-		})
-	}
-}
-
-func mustCompactTimeoutError(t *testing.T) error {
-	t.Helper()
-	_, err := parseCompactTimeout("0")
-	if err == nil {
-		t.Fatal("parseCompactTimeout(\"0\") succeeded, want an error")
-	}
-	return err
-}
-
-func TestCompactRejectionAndFailureReachTheUserAsUnavailable(t *testing.T) {
-	cases := []struct {
-		name  string
-		peer  func(map[string]any) []map[string]any
-		cause error
-	}{
-		{"rejected request", func(request map[string]any) []map[string]any {
-			return []map[string]any{{"id": request["id"], "error": map[string]any{"message": "compaction refused"}}}
-		}, errCompactionRejected},
-		{"failed turn", answerCompaction(turnEnded("failed", map[string]any{fieldMessage: "context overflow"})), errCompactionFailed},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			peer := newCompactPeer(t, tc.peer)
-			_, err := compactingResponder(peer).Compact(t.Context(), contracts.CompactRequest{}, nil)
-			if !errors.Is(err, tc.cause) {
-				t.Fatalf("err=%v, want %v in its chain", err, tc.cause)
-			}
-			notice := contracts.NoticeOf(err)
-			if notice.Code != contracts.CodeCompactUnavailable {
-				t.Fatalf("code=%v, want CodeCompactUnavailable", notice.Code)
-			}
-			if len(notice.Args) != 1 || notice.Args[0].Name() != "Reason" || !strings.Contains(fmt.Sprint(notice.Args[0].Value()), "codex") {
-				t.Fatalf("args=%+v, want the technical text as Reason", notice.Args)
-			}
-		})
-	}
-}
-
 func TestCompactedResultCarriesTheCompactedNotice(t *testing.T) {
 	peer := newCompactPeer(t, answerCompaction(completedTurn()))
 	got, err := compactingResponder(peer).Compact(t.Context(), contracts.CompactRequest{}, nil)
@@ -741,6 +676,8 @@ func TestUnavailableReasonIsTheFirstLineBoundedTo200Runes(t *testing.T) {
 		reason string
 	}{
 		{"several lines keep the first", "first line\nsecond line\nthird", "first line"},
+		{"a leading blank line is skipped", "\nfoo", "foo"},
+		{"blank lines and spaces are skipped", "  \n\t\n  bar  \nbaz", "bar"},
 		{"a long line is cut with an ellipsis", long, strings.Repeat("a", 199) + "…"},
 		{"exactly 200 runes is kept whole", exact, exact},
 	}
@@ -759,4 +696,115 @@ func TestUnavailableReasonIsTheFirstLineBoundedTo200Runes(t *testing.T) {
 			}
 		})
 	}
+}
+
+func requireUnavailable(t *testing.T, err error, cause error, reason string) {
+	t.Helper()
+	if !errors.Is(err, cause) {
+		t.Fatalf("err=%v, want %v in its chain", err, cause)
+	}
+	notice := contracts.NoticeOf(err)
+	if notice.Code != contracts.CodeCompactUnavailable {
+		t.Fatalf("code=%v, want CodeCompactUnavailable", notice.Code)
+	}
+	if len(notice.Args) != 1 || notice.Args[0].Name() != "Reason" || notice.Args[0].Kind() != contracts.ArgText {
+		t.Fatalf("args=%+v, want one text argument named Reason", notice.Args)
+	}
+	if notice.Args[0].Value() != reason {
+		t.Fatalf("Reason=%q, want %q", notice.Args[0].Value(), reason)
+	}
+}
+
+func TestUnavailableNoticesCarryTheFixedReason(t *testing.T) {
+	_, timeoutErr := parseCompactTimeout("0")
+	cases := []struct {
+		name   string
+		err    error
+		reason string
+	}{
+		{"instruction", errCompactInstruction, "thread/compact/start takes no instruction, and the backend has no field for one"},
+		{"no thread", errCompactNoThread, "no turn has run yet, so there is no thread to compact"},
+		{"timeout not positive", timeoutErr, "a compaction timeout must be a positive duration"},
+	}
+	renderer := contracts.NewRenderer()
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			requireUnavailable(t, tc.err, tc.err, tc.reason)
+			if _, err := renderer.Render(i18n.French, contracts.NoticeOf(tc.err)); err != nil {
+				t.Fatalf("Render: %v", err)
+			}
+		})
+	}
+}
+
+func TestCompactRejectionAndFailureReachTheUserAsUnavailable(t *testing.T) {
+	cases := []struct {
+		name   string
+		peer   func(map[string]any) []map[string]any
+		cause  error
+		reason string
+	}{
+		{"rejected request", func(request map[string]any) []map[string]any {
+			return []map[string]any{{"id": request["id"], "error": map[string]any{"message": "compaction refused"}}}
+		}, errCompactionRejected, "the compaction was rejected: compaction refused"},
+		{"failed turn", answerCompaction(turnEnded("failed", map[string]any{fieldMessage: "context overflow"})), errCompactionFailed, "the compaction turn failed: context overflow"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			peer := newCompactPeer(t, tc.peer)
+			_, err := compactingResponder(peer).Compact(t.Context(), contracts.CompactRequest{}, nil)
+			requireUnavailable(t, err, tc.cause, tc.reason)
+		})
+	}
+}
+
+func TestCompactReopenFailureIsUnavailableAndKeepsItsCause(t *testing.T) {
+	errOpen := errors.New("app-server did not start")
+	r := &streamResponder{resumeID: "thread-1", start: func(context.Context, string) (*appSession, error) {
+		return nil, errOpen
+	}}
+	_, err := r.Compact(t.Context(), contracts.CompactRequest{}, nil)
+	requireUnavailable(t, err, errOpen, "reopening the thread: app-server did not start")
+}
+
+func TestCompactDeadlineIsUnavailableAndKeepsItsCause(t *testing.T) {
+	peer := newCompactPeer(t, answerCompaction(completedTurn()))
+	ctx, cancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+	defer cancel()
+	_, err := compactingResponder(peer).Compact(ctx, contracts.CompactRequest{}, nil)
+	requireUnavailable(t, err, context.DeadlineExceeded, "the compaction failed: context deadline exceeded")
+}
+
+type brokenWriteCloser struct {
+	err error
+}
+
+func (w brokenWriteCloser) Write([]byte) (int, error) { return 0, w.err }
+
+func (w brokenWriteCloser) Close() error { return nil }
+
+type silentWriteCloser struct{}
+
+func (silentWriteCloser) Write(p []byte) (int, error) { return len(p), nil }
+
+func (silentWriteCloser) Close() error { return nil }
+
+type brokenReader struct {
+	err error
+}
+
+func (r brokenReader) Read([]byte) (int, error) { return 0, r.err }
+
+func TestCompactWriteFailureIsUnavailableAndKeepsItsCause(t *testing.T) {
+	errWrite := errors.New("pipe to codex closed")
+	r := &streamResponder{sess: newAppSession(brokenWriteCloser{err: errWrite}, strings.NewReader(""))}
+	_, err := r.Compact(t.Context(), contracts.CompactRequest{}, nil)
+	requireUnavailable(t, err, errWrite, "the compaction failed: pipe to codex closed")
+}
+
+func TestCompactReadFailureIsUnavailableAndKeepsItsCause(t *testing.T) {
+	errRead := errors.New("codex stdout closed")
+	r := &streamResponder{sess: newAppSession(silentWriteCloser{}, brokenReader{err: errRead})}
+	_, err := r.Compact(t.Context(), contracts.CompactRequest{}, nil)
+	requireUnavailable(t, err, errRead, "the compaction failed: codex: app-server closed before any turn output")
 }

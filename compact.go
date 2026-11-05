@@ -40,24 +40,39 @@ func (e *compactUnavailableError) Unwrap() error {
 }
 
 func (e *compactUnavailableError) Notice() contracts.Notice {
-	return contracts.Notice{Code: contracts.CodeCompactUnavailable, Args: []contracts.Arg{contracts.Text("Reason", boundedReason(e.reason))}}
+	return contracts.Notice{Code: contracts.CodeCompactUnavailable, Args: []contracts.Arg{contracts.Text("Reason", noticeReason(e.reason))}}
 }
 
-func boundedReason(cause string) string {
-	line, _, _ := strings.Cut(cause, "\n")
-	line = strings.TrimSpace(line)
+func unavailable(what string, err error) error {
+	if _, typed := errors.AsType[*compactUnavailableError](err); typed {
+		return err
+	}
+	return &compactUnavailableError{reason: what + ": " + err.Error(), cause: err}
+}
+
+func noticeReason(cause string) string {
+	line := firstNonBlankLine(cause)
 	if utf8.RuneCountInString(line) <= maxReasonRunes {
 		return line
 	}
 	return string([]rune(line)[:maxReasonRunes-1]) + "…"
 }
 
+func firstNonBlankLine(text string) string {
+	for line := range strings.SplitSeq(text, "\n") {
+		if trimmed := strings.TrimSpace(line); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
 var (
 	errCompactTimeoutNotPositive = &compactUnavailableError{reason: "a compaction timeout must be a positive duration"}
 	errCompactInstruction        = &compactUnavailableError{reason: "thread/compact/start takes no instruction, and the backend has no field for one"}
 	errCompactNoThread           = &compactUnavailableError{reason: "no turn has run yet, so there is no thread to compact"}
-	errCompactionRejected        = errors.New("codex rejected the compaction")
-	errCompactionFailed          = errors.New("codex compaction turn failed")
+	errCompactionRejected        = errors.New("the compaction was rejected")
+	errCompactionFailed          = errors.New("the compaction turn failed")
 )
 
 func (r *streamResponder) Compact(ctx context.Context, req contracts.CompactRequest, onEvent func(contracts.BackendEvent)) (contracts.CompactResult, error) {
@@ -73,14 +88,14 @@ func (r *streamResponder) Compact(ctx context.Context, req contracts.CompactRequ
 			return contracts.CompactResult{}, errCompactNoThread
 		}
 		if err := r.open(ctx, r.resumeID); err != nil {
-			return contracts.CompactResult{}, fmt.Errorf("codex compaction: %w", err)
+			return contracts.CompactResult{}, unavailable("reopening the thread", err)
 		}
 	}
 	if err := r.sess.Compact(ctx, onEvent); err != nil {
 		if !errors.Is(err, errCompactionRejected) && !errors.Is(err, errCompactionFailed) {
 			r.dropSession()
 		}
-		return contracts.CompactResult{}, fmt.Errorf("codex compaction: %w", err)
+		return contracts.CompactResult{}, unavailable("the compaction failed", err)
 	}
 	return contracts.CompactResult{Note: compactNote, Notice: contracts.Notice{Code: contracts.CodeCompacted}}, nil
 }
