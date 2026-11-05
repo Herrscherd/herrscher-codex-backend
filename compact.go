@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	contracts "github.com/Herrscherd/herrscher-contracts"
 )
@@ -17,17 +18,61 @@ const (
 	methodCompactStart    = "thread/compact/start"
 	itemContextCompaction = "contextCompaction"
 	compactionTool        = "compaction"
-	compactNote           = "Contexte compacté par Codex, taille après compaction non mesurée."
+	compactNote           = "Context compacted by Codex, size after compaction not measured."
 	envCompactTimeout     = "CODEX_COMPACT_TIMEOUT"
 	defaultCompactTimeout = 10 * time.Minute
+	maxReasonRunes        = 200
 )
 
+type compactUnavailableError struct {
+	reason string
+	cause  error
+}
+
+var _ contracts.NoticeError = (*compactUnavailableError)(nil)
+
+func (e *compactUnavailableError) Error() string {
+	return "codex compaction unavailable: " + e.reason
+}
+
+func (e *compactUnavailableError) Unwrap() error {
+	return e.cause
+}
+
+func (e *compactUnavailableError) Notice() contracts.Notice {
+	return contracts.Notice{Code: contracts.CodeCompactUnavailable, Args: []contracts.Arg{contracts.Text("Reason", noticeReason(e.reason))}}
+}
+
+func unavailable(what string, err error) error {
+	if _, typed := errors.AsType[*compactUnavailableError](err); typed {
+		return err
+	}
+	return &compactUnavailableError{reason: what + ": " + err.Error(), cause: err}
+}
+
+func noticeReason(cause string) string {
+	line := firstNonBlankLine(cause)
+	if utf8.RuneCountInString(line) <= maxReasonRunes {
+		return line
+	}
+	return string([]rune(line)[:maxReasonRunes-1]) + "…"
+}
+
+func firstNonBlankLine(text string) string {
+	for line := range strings.SplitSeq(text, "\n") {
+		if trimmed := strings.TrimSpace(line); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
 var (
-	errCompactTimeoutNotPositive = errors.New("a compaction timeout must be a positive duration")
-	errCompactInstruction        = errors.New("codex compaction takes no instruction: thread/compact/start has no field for one")
-	errCompactNoThread           = errors.New("codex compaction needs an open thread: no turn has run yet")
-	errCompactionRejected        = errors.New("codex rejected the compaction")
-	errCompactionFailed          = errors.New("codex compaction turn failed")
+	errCompactTimeoutNotPositive = &compactUnavailableError{reason: "a compaction timeout must be a positive duration"}
+	errCompactInstruction        = &compactUnavailableError{reason: "thread/compact/start takes no instruction, and the backend has no field for one"}
+	errCompactNoThread           = &compactUnavailableError{reason: "no turn has run yet, so there is no thread to compact"}
+	errCompactionRejected        = errors.New("the compaction was rejected")
+	errCompactionFailed          = errors.New("the compaction turn failed")
 )
 
 func (r *streamResponder) Compact(ctx context.Context, req contracts.CompactRequest, onEvent func(contracts.BackendEvent)) (contracts.CompactResult, error) {
@@ -43,16 +88,16 @@ func (r *streamResponder) Compact(ctx context.Context, req contracts.CompactRequ
 			return contracts.CompactResult{}, errCompactNoThread
 		}
 		if err := r.open(ctx, r.resumeID); err != nil {
-			return contracts.CompactResult{}, fmt.Errorf("codex compaction: %w", err)
+			return contracts.CompactResult{}, unavailable("reopening the thread", err)
 		}
 	}
 	if err := r.sess.Compact(ctx, onEvent); err != nil {
 		if !errors.Is(err, errCompactionRejected) && !errors.Is(err, errCompactionFailed) {
 			r.dropSession()
 		}
-		return contracts.CompactResult{}, fmt.Errorf("codex compaction: %w", err)
+		return contracts.CompactResult{}, unavailable("the compaction failed", err)
 	}
-	return contracts.CompactResult{Note: compactNote}, nil
+	return contracts.CompactResult{Note: compactNote, Notice: contracts.Notice{Code: contracts.CodeCompacted}}, nil
 }
 
 func parseCompactTimeout(raw string) (time.Duration, error) {
@@ -107,10 +152,10 @@ func (s *appSession) Compact(ctx context.Context, onEvent func(contracts.Backend
 		return err
 	}
 	if turn.rejected {
-		return fmt.Errorf("%w: %s", errCompactionRejected, turn.ErrMsg)
+		return &compactUnavailableError{reason: fmt.Sprintf("%s: %s", errCompactionRejected, turn.ErrMsg), cause: errCompactionRejected}
 	}
 	if turn.IsError {
-		return fmt.Errorf("%w: %s", errCompactionFailed, turn.ErrMsg)
+		return &compactUnavailableError{reason: fmt.Sprintf("%s: %s", errCompactionFailed, turn.ErrMsg), cause: errCompactionFailed}
 	}
 	return nil
 }
