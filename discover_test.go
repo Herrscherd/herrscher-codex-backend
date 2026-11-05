@@ -20,8 +20,24 @@ const (
 	fakeAppServerEnv  = "HERRSCHER_FAKE_APP_SERVER"
 	fakeHeartbeatEnv  = "HERRSCHER_FAKE_HEARTBEAT"
 	fakeModeEnv       = "HERRSCHER_FAKE_MODE"
+	fakeWitnessEnv    = "HERRSCHER_FAKE_WITNESS"
 	heartbeatModeName = "heartbeat"
 )
+
+func leakyStderrSecrets() []string {
+	return []string{
+		"ghp_0123456789abcdefghijklmnopqrstuvwxyz",
+		"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl",
+		"AKIAIOSFODNN7EXAMPLE",
+		"https://user:hunter2@git.example",
+		"-----BEGIN PRIVATE KEY-----",
+		"auth=zz1",
+		"refresh=zz2",
+		"sessionid=zz3",
+		"api_key=sk-xyz",
+		"Bearer sk-live-123",
+	}
+}
 
 func TestMain(m *testing.M) {
 	if os.Getenv(fakeAppServerEnv) == "1" {
@@ -155,7 +171,7 @@ func TestDiscoverDeadlineKillsGrandchildHoldingStdout(t *testing.T) {
 	}
 }
 
-func TestDiscoverKeepsStderrOutOfErrorAndLogsIt(t *testing.T) {
+func TestDiscoverKeepsStderrOutOfErrorAndLog(t *testing.T) {
 	logged := captureLog(t)
 	command := fakeCodexCommand(t, "flood")
 	_, err := discover(context.Background(), contracts.DiscoveryAccess{Getenv: envWith(command)})
@@ -165,15 +181,15 @@ func TestDiscoverKeepsStderrOutOfErrorAndLogsIt(t *testing.T) {
 	if strings.Contains(err.Error(), "app-server boot") {
 		t.Fatalf("stderr reached the returned error: %v", err)
 	}
-	if !strings.Contains(logged.String(), "app-server boot") {
-		t.Fatalf("stderr not logged: %s", logged)
+	if !strings.Contains(logged.String(), "stderr_bytes=") {
+		t.Fatalf("stderr size not logged: %s", logged)
 	}
-	if logged.Len() > discoverStderrMax+1024 {
-		t.Fatalf("log carries %d bytes, stderr is not bounded", logged.Len())
+	if logged.Len() > 1024 {
+		t.Fatalf("log carries %d bytes, stderr content must not be logged", logged.Len())
 	}
 }
 
-func TestDiscoverLogsNoSecretLines(t *testing.T) {
+func TestDiscoverLogsNoStderrContent(t *testing.T) {
 	logged := captureLog(t)
 	command := fakeCodexCommand(t, "leaky")
 	_, err := discover(context.Background(), contracts.DiscoveryAccess{Getenv: envWith(command)})
@@ -181,18 +197,89 @@ func TestDiscoverLogsNoSecretLines(t *testing.T) {
 		t.Fatal("a silent app-server listed models")
 	}
 	text := logged.String()
-	if !strings.Contains(text, "app-server boot") {
-		t.Fatalf("benign stderr line not logged: %s", text)
+	if !strings.Contains(text, "stderr_bytes=") || !strings.Contains(text, "exit_code=") {
+		t.Fatalf("failure not logged with its size and exit code: %s", text)
 	}
-	for _, secret := range []string{"sk-live-123", "Bearer", "api_key", "session token"} {
+	for _, secret := range leakyStderrSecrets() {
 		if strings.Contains(text, secret) {
 			t.Fatalf("log carries %q: %s", secret, text)
 		}
 	}
 }
 
+func TestDiscoverGatewayOnlyNeverRunsNativeCLI(t *testing.T) {
+	witness := filepath.Join(t.TempDir(), "witness")
+	t.Setenv(fakeWitnessEnv, witness)
+	command := fakeCodexCommand(t, "list")
+	gateway, err := contracts.NewGatewayCreds("https://gateway.example", "gw-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	models, err := discover(context.Background(), contracts.DiscoveryAccess{Gateway: gateway, Policy: contracts.PolicyGatewayOnly, Getenv: envWith(command)})
+	if err != nil || models != nil {
+		t.Fatalf("discover = %v, %v; want nil, nil", models, err)
+	}
+	if _, statErr := os.Stat(witness); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("native CLI ran under gateway-only (witness: %v)", statErr)
+	}
+}
+
+func TestDiscoverAllPolicyListsNativeWithGatewayConfigured(t *testing.T) {
+	witness := filepath.Join(t.TempDir(), "witness")
+	t.Setenv(fakeWitnessEnv, witness)
+	command := fakeCodexCommand(t, "list")
+	gateway, err := contracts.NewGatewayCreds("https://gateway.example", "gw-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	models, err := discover(context.Background(), contracts.DiscoveryAccess{Gateway: gateway, Policy: contracts.PolicyAll, Getenv: envWith(command)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, statErr := os.Stat(witness); statErr != nil {
+		t.Fatalf("native CLI did not run under PolicyAll: %v", statErr)
+	}
+	if len(models) != 2 || models[0].ID != "gpt-7" || models[0].Route != contracts.RouteNative || models[1].Route != contracts.RouteNative {
+		t.Fatalf("models = %+v, want the native listing", models)
+	}
+}
+
+func TestKillAfterTreeFailureLogsAndKillsProcess(t *testing.T) {
+	logged := captureLog(t)
+	command := fakeCodexCommand(t, "hang")
+	cmd := exec.CommandContext(context.Background(), command, "app-server")
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if closeErr := stdin.Close(); closeErr != nil {
+			t.Log(closeErr)
+		}
+	})
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if err := killAfterTreeFailure(cmd.Process, errors.New("taskkill refused")); err != nil {
+		t.Fatal(err)
+	}
+	if waitErr := cmd.Wait(); waitErr == nil {
+		t.Fatal("process survived its kill")
+	}
+	if !strings.Contains(logged.String(), "taskkill failed") {
+		t.Fatalf("fallback kill not logged: %s", logged)
+	}
+}
+
 func fakeAppServerMain() {
 	mode := os.Getenv(fakeModeEnv)
+	if witness := os.Getenv(fakeWitnessEnv); witness != "" {
+		if err := os.WriteFile(witness, []byte("ran"), 0o600); err != nil {
+			panic(err)
+		}
+	}
 	if mode == heartbeatModeName {
 		beat(os.Getenv(fakeHeartbeatEnv))
 	}
@@ -242,7 +329,7 @@ func serveFakeAppServer(in, out *os.File, mode string) {
 		}
 		return
 	case "leaky":
-		if _, err := os.Stderr.WriteString("app-server boot\nAuthorization: Bearer sk-live-123\napi_key=sk-xyz\nsession token=abc\n"); err != nil {
+		if _, err := os.Stderr.WriteString("app-server boot\n" + strings.Join(leakyStderrSecrets(), "\n") + "\n"); err != nil {
 			panic(err)
 		}
 		return

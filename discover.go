@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -22,7 +23,6 @@ const (
 	discoverInitializeID = 0
 	discoverModelListID  = 1
 	discoverFrameMax     = 4 << 20
-	discoverStderrMax    = 2048
 	discoverWaitDelay    = 2 * time.Second
 )
 
@@ -59,6 +59,9 @@ type reasoningOption struct {
 }
 
 func discover(ctx context.Context, access contracts.DiscoveryAccess) ([]contracts.ModelSpec, error) {
+	if !access.Policy.Allows(contracts.RouteNative) {
+		return nil, nil
+	}
 	command := strings.TrimSpace(access.Getenv("CODEX_CMD"))
 	if command == "" {
 		command = defaultDiscoverCmd
@@ -74,7 +77,7 @@ func listAppServerModels(ctx context.Context, command string) ([]codexModel, err
 	cmd := exec.CommandContext(ctx, command, "app-server", "--listen", "stdio://")
 	configureChild(cmd)
 	cmd.WaitDelay = discoverWaitDelay
-	stderr := &boundedBuffer{limit: discoverStderrMax}
+	stderr := &stderrCounter{}
 	cmd.Stderr = stderr
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -97,43 +100,44 @@ func listAppServerModels(ctx context.Context, command string) ([]codexModel, err
 	waitErr := cmd.Wait()
 	switch {
 	case sessionErr != nil:
-		return nil, logAppServerFailure(sessionErr, stderr)
+		return nil, logAppServerFailure(sessionErr, waitErr, stderr.bytes)
 	case closeErr != nil:
 		return nil, fmt.Errorf("close app-server stdin: %w", closeErr)
 	case waitErr != nil:
-		return nil, logAppServerFailure(fmt.Errorf("app-server exited: %w", waitErr), stderr)
+		return nil, logAppServerFailure(fmt.Errorf("app-server exited: %w", waitErr), waitErr, stderr.bytes)
 	}
 	return models, nil
 }
 
-func logAppServerFailure(err error, stderr *boundedBuffer) error {
-	if text := loggableStderr(stderr.String()); text != "" {
-		slog.Warn("app-server failed", "error", err, "stderr", text)
-	}
+type stderrCounter struct {
+	bytes int
+}
+
+func (c *stderrCounter) Write(data []byte) (int, error) {
+	c.bytes += len(data)
+	return len(data), nil
+}
+
+func logAppServerFailure(err, waitErr error, stderrBytes int) error {
+	slog.Warn("app-server failed", "error", err, "exit_code", exitCode(waitErr), "stderr_bytes", stderrBytes)
 	return err
 }
 
-func loggableStderr(text string) string {
-	var kept []string
-	for _, line := range strings.Split(text, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || looksLikeSecret(line) {
-			continue
-		}
-		kept = append(kept, line)
+func killAfterTreeFailure(process *os.Process, treeErr error) error {
+	slog.Warn("taskkill failed, killing the app-server process only", "error", treeErr)
+	err := process.Kill()
+	if err != nil && !errors.Is(err, os.ErrProcessDone) {
+		return err
 	}
-	return strings.Join(kept, " | ")
+	return nil
 }
 
-func looksLikeSecret(line string) bool {
-	lower := strings.ToLower(line)
-	secretMarkers := []string{"token", "secret", "password", "passwd", "api_key", "apikey", "api-key", "authorization", "bearer", "credential", "cookie", "sk-"}
-	for _, marker := range secretMarkers {
-		if strings.Contains(lower, marker) {
-			return true
-		}
+func exitCode(err error) int {
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitCode()
 	}
-	return false
+	return 0
 }
 
 func runModelList(in io.Writer, out *bufio.Reader) ([]codexModel, error) {
