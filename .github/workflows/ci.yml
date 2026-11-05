@@ -29,4 +29,4 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Model discovery and process tree on Windows
-        run: go test -race -run 'TestDiscover' .
+        run: go test -race -run 'TestDiscover|TestKillAfterTreeFailureLogsAndKillsProcess' .
