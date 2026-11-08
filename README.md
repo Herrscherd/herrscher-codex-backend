@@ -205,6 +205,55 @@ visibility rule above), and the gateway duplicates `gw-gpt-5.5` and
 `gw-gpt-5.6-sol`. They stay in the catalog so a resumed session still finds its
 route by `ID`.
 
+## Health and limits
+
+The plugin registers `Probe` and `Limits`, the plugin level functions the host
+calls for `herrscher health` and `herrscher usage` without a live backend. Both
+run the `codex` binary named by the `cmd` setting (else `CODEX_CMD`, else
+`codex`) under the environment of the account probed: `CODEX_HOME` is the value
+`ProbeAccess.Getenv` gives, and a `CODEX_HOME` of the daemon that the access does
+not name is dropped, so the native account never reads a profile directory and a
+profile never reads the native one.
+
+`Probe` runs `codex login status`, which spends no turn. Its exit code decides:
+
+| Finding | State | Detail | Remedy |
+|---|---|---|---|
+| exit 0 | ok, with the latency of the check | `health.connected` | |
+| any other exit | off | `health.not_logged_in` | run `codex login` for the native account, `herrscher account add codex <name>` for a profile |
+| the binary is missing | off | `health.unreachable`, reason `codex not found` | |
+| the host deadline passed | down | `health.unreachable`, reason `timeout` | |
+
+With `Deep`, a logged in account also runs one minimal turn:
+`codex exec --json --skip-git-repo-check --ephemeral --sandbox read-only` with
+`approval_policy="never"`, the `model` setting (else `CODEX_MODEL`) when set,
+and a one line prompt on stdin, from the temporary directory. A
+`turn.completed` event is ok. A `turn.failed` event reads the limits: a window
+used at 100% makes the state degraded with `health.rate_limited`, otherwise it
+is down with the reason `turn failed`. No turn event at all is down with the
+reason `no turn completed`.
+
+`Limits` starts `codex app-server --listen stdio://` and sends
+`account/rateLimits/read` with `excludeResetCreditDetails`, which reads the
+ChatGPT plan usage the CLI itself shows and spends no turn. The method and its
+response come from the protocol schema of `codex-cli` 0.167.0
+(`GetAccountRateLimitsResponse`). Each bucket of `rateLimitsByLimitId` (else the
+single `rateLimits` bucket) gives up to two windows, `primary` and `secondary`.
+A window becomes a `contracts.Limit` when its `windowDurationMins` names a known
+period: 300 minutes is five-hour, 10080 is weekly, 28 to 31 days is monthly. A
+window of any other length is skipped. `usedPercent` is clamped to 0 to 100,
+`resetsAt` (Unix seconds) becomes `ResetsAt` and the duration becomes `Span`.
+The `codex` bucket is the whole account, so its scope is empty; any other
+bucket is scoped by its stable `limitId` (`codex_spark`), never by its display
+name. A refusal of the app-server (seen for an account that is not logged in;
+an account on an API key is expected to be refused the same way) and a
+response with no known window both return `contracts.ErrLimitsUnavailable`.
+Failing to start the binary is an ordinary error.
+
+The event stream of the app-server reports token usage per thread
+(`thread/tokenUsage/updated`) without naming the model, so the backend fills no
+`Models` breakdown.
+
 ## The gateway route needs a config file
 
 Unlike the claude CLI, `codex` cannot be redirected with environment variables

@@ -137,6 +137,19 @@ func TestDiscoverStopsWhenDeadlinePasses(t *testing.T) {
 	}
 }
 
+func TestDiscoverKeepsTheAnswerOfAServerThatOutlivesItsStdin(t *testing.T) {
+	command := fakeCodexCommand(t, "linger")
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	models, err := discover(ctx, contracts.DiscoveryAccess{Getenv: envWith(command)})
+	if err != nil {
+		t.Fatalf("err = %v, want the models answered before the deadline", err)
+	}
+	if len(models) != 2 {
+		t.Fatalf("models = %+v", models)
+	}
+}
+
 func TestDiscoverRefusesOversizedFrame(t *testing.T) {
 	command := fakeCodexCommand(t, "giant")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -284,6 +297,9 @@ func fakeAppServerMain() {
 		beat(os.Getenv(fakeHeartbeatEnv))
 	}
 	serveFakeAppServer(os.Stdin, os.Stdout, mode)
+	if mode == "linger" {
+		time.Sleep(time.Hour)
+	}
 }
 
 func beat(path string) {

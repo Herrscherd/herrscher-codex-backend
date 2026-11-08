@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"time"
 
@@ -17,13 +18,13 @@ import (
 )
 
 const (
-	defaultDiscoverCmd   = "codex"
-	discoverPageLimit    = 200
-	discoverMaxPages     = 20
-	discoverInitializeID = 0
-	discoverModelListID  = 1
-	discoverFrameMax     = 4 << 20
-	discoverWaitDelay    = 2 * time.Second
+	defaultDiscoverCmd    = "codex"
+	discoverPageLimit     = 200
+	discoverMaxPages      = 20
+	appServerInitializeID = 0
+	appServerCallID       = 1
+	discoverFrameMax      = 4 << 20
+	discoverWaitDelay     = 2 * time.Second
 )
 
 var (
@@ -74,23 +75,37 @@ func discover(ctx context.Context, access contracts.DiscoveryAccess) ([]contract
 }
 
 func listAppServerModels(ctx context.Context, command string) ([]codexModel, error) {
-	cmd := exec.CommandContext(ctx, command, "app-server", "--listen", "stdio://")
+	var models []codexModel
+	err := callAppServer(ctx, []string{command}, nil, func(session *rpcSession) error {
+		listed, err := listAllModels(session)
+		models = listed
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return models, nil
+}
+
+func callAppServer(ctx context.Context, argv, env []string, call func(*rpcSession) error) error {
+	cmd := exec.CommandContext(ctx, argv[0], slices.Concat(argv[1:], []string{"app-server", "--listen", "stdio://"})...)
 	configureChild(cmd)
 	cmd.WaitDelay = discoverWaitDelay
+	cmd.Env = env
 	stderr := &stderrCounter{}
 	cmd.Stderr = stderr
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return nil, fmt.Errorf("open app-server stdin: %w", err)
+		return fmt.Errorf("open app-server stdin: %w", err)
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return nil, fmt.Errorf("open app-server stdout: %w", err)
+		return fmt.Errorf("open app-server stdout: %w", err)
 	}
 	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("start app-server: %w", err)
+		return fmt.Errorf("start app-server: %w", err)
 	}
-	models, sessionErr := runModelList(stdin, bufio.NewReader(stdout))
+	sessionErr := runSession(stdin, bufio.NewReader(stdout), call)
 	if sessionErr != nil {
 		if killErr := killProcessTree(cmd); killErr != nil {
 			sessionErr = errors.Join(sessionErr, killErr)
@@ -100,13 +115,13 @@ func listAppServerModels(ctx context.Context, command string) ([]codexModel, err
 	waitErr := cmd.Wait()
 	switch {
 	case sessionErr != nil:
-		return nil, logAppServerFailure(sessionErr, waitErr, stderr.bytes)
+		return logAppServerFailure(sessionErr, waitErr, stderr.bytes)
 	case closeErr != nil:
-		return nil, fmt.Errorf("close app-server stdin: %w", closeErr)
-	case waitErr != nil:
-		return nil, logAppServerFailure(fmt.Errorf("app-server exited: %w", waitErr), waitErr, stderr.bytes)
+		return fmt.Errorf("close app-server stdin: %w", closeErr)
+	case waitErr != nil && ctx.Err() == nil:
+		return logAppServerFailure(fmt.Errorf("app-server exited: %w", waitErr), waitErr, stderr.bytes)
 	}
-	return models, nil
+	return nil
 }
 
 type stderrCounter struct {
@@ -140,18 +155,18 @@ func exitCode(err error) int {
 	return 0
 }
 
-func runModelList(in io.Writer, out *bufio.Reader) ([]codexModel, error) {
+func runSession(in io.Writer, out *bufio.Reader, call func(*rpcSession) error) error {
 	session := &rpcSession{in: in, out: out}
-	if _, err := session.request(discoverInitializeID, "initialize", map[string]any{
+	if _, err := session.request(appServerInitializeID, "initialize", map[string]any{
 		"clientInfo":   map[string]string{"name": "herrscher", "version": "discovery"},
 		"capabilities": make(map[string]any),
 	}); err != nil {
-		return nil, err
+		return err
 	}
 	if err := session.notify("initialized"); err != nil {
-		return nil, err
+		return err
 	}
-	return listAllModels(session)
+	return call(session)
 }
 
 func listAllModels(session *rpcSession) ([]codexModel, error) {
@@ -162,7 +177,7 @@ func listAllModels(session *rpcSession) ([]codexModel, error) {
 		if cursor != "" {
 			params["cursor"] = cursor
 		}
-		raw, err := session.request(discoverModelListID, "model/list", params)
+		raw, err := session.request(appServerCallID, "model/list", params)
 		if err != nil {
 			return nil, err
 		}
