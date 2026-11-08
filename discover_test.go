@@ -297,6 +297,9 @@ func fakeAppServerMain() {
 		beat(os.Getenv(fakeHeartbeatEnv))
 	}
 	serveFakeAppServer(os.Stdin, os.Stdout, mode)
+	if mode == "linger" {
+		time.Sleep(time.Hour)
+	}
 }
 
 func beat(path string) {
@@ -362,9 +365,6 @@ func serveFakeAppServer(in, out *os.File, mode string) {
 			}
 			answerModelList(out, mode, line)
 		}
-	}
-	if mode == "linger" {
-		time.Sleep(time.Hour)
 	}
 }
 
