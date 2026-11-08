@@ -118,7 +118,7 @@ func callAppServer(ctx context.Context, argv, env []string, call func(*rpcSessio
 		return logAppServerFailure(sessionErr, waitErr, stderr.bytes)
 	case closeErr != nil:
 		return fmt.Errorf("close app-server stdin: %w", closeErr)
-	case waitErr != nil:
+	case waitErr != nil && ctx.Err() == nil:
 		return logAppServerFailure(fmt.Errorf("app-server exited: %w", waitErr), waitErr, stderr.bytes)
 	}
 	return nil

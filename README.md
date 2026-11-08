@@ -244,8 +244,9 @@ period: 300 minutes is five-hour, 10080 is weekly, 28 to 31 days is monthly. A
 window of any other length is skipped. `usedPercent` is clamped to 0 to 100,
 `resetsAt` (Unix seconds) becomes `ResetsAt` and the duration becomes `Span`.
 The `codex` bucket is the whole account, so its scope is empty; any other
-bucket is scoped by its `limitName`, else its `limitId`. A refusal of the
-app-server (an account logged in with an API key, or not logged in) and a
+bucket is scoped by its stable `limitId` (`codex_spark`), never by its display
+name. A refusal of the app-server (seen for an account that is not logged in;
+an account on an API key is expected to be refused the same way) and a
 response with no known window both return `contracts.ErrLimitsUnavailable`.
 Failing to start the binary is an ordinary error.
 

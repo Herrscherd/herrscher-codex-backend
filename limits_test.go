@@ -36,7 +36,7 @@ func TestLimitsScopesEveryBucketButTheAccountOne(t *testing.T) {
 	want := []contracts.Limit{
 		{Window: contracts.LimitFiveHour, UsedPercent: 12, Span: 5 * time.Hour},
 		{Window: contracts.LimitWeekly, UsedPercent: 100, Span: 7 * 24 * time.Hour},
-		{Window: contracts.LimitFiveHour, Scope: "Spark", UsedPercent: 0, Span: 5 * time.Hour},
+		{Window: contracts.LimitFiveHour, Scope: "codex_spark", UsedPercent: 0, Span: 5 * time.Hour},
 	}
 	if !slices.Equal(limits, want) {
 		t.Fatalf("limits = %+v, want %+v", limits, want)
@@ -67,5 +67,24 @@ func TestLimitsMissingBinaryIsAFailureNotAnAbsence(t *testing.T) {
 	_, err := readLimits(t.Context(), access)
 	if err == nil || errors.Is(err, contracts.ErrLimitsUnavailable) {
 		t.Fatalf("err = %v, want a start failure", err)
+	}
+}
+
+func TestLimitWindowOfMonthBounds(t *testing.T) {
+	day := 24 * time.Hour
+	cases := []struct {
+		span  time.Duration
+		known bool
+	}{
+		{27 * day, false},
+		{28 * day, true},
+		{31 * day, true},
+		{32 * day, false},
+	}
+	for _, c := range cases {
+		window, known := limitWindowOf(c.span)
+		if known != c.known || (known && window != contracts.LimitMonthly) {
+			t.Errorf("limitWindowOf(%v) = %v, %v; want monthly %v", c.span, window, known, c.known)
+		}
 	}
 }

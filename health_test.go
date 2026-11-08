@@ -234,3 +234,15 @@ func TestPluginRegistersProbeAndLimits(t *testing.T) {
 		t.Fatal("the codex plugin registers no Probe or no Limits")
 	}
 }
+
+func TestProbeDeepFindsTheCompletedTurnAfterALongOutput(t *testing.T) {
+	fake := installFakeCodex(t)
+	noise := strings.Repeat(`{"type":"item.completed","item":{"text":"`+strings.Repeat("x", 1000)+`"}}`+"\n", 80)
+	fake.write(t, "exec.jsonl", noise+`{"type":"turn.completed","usage":{"input_tokens":3}}`)
+	access := fake.access("")
+	access.Deep = true
+	report := probe(t.Context(), access)
+	if report.State != contracts.HealthOK {
+		t.Fatalf("report = %+v, want ok after more than the buffer limit", report)
+	}
+}

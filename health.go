@@ -136,7 +136,7 @@ func (t probeTarget) minimalTurn(ctx context.Context) contracts.ProbeReport {
 	cmd := t.command(ctx, append(args, stdinPromptArg)...)
 	cmd.Dir = os.TempDir()
 	cmd.Stdin = strings.NewReader(probePrompt)
-	output := &boundedBuffer{limit: probeOutputLimit}
+	output := &tailBuffer{limit: probeOutputLimit}
 	cmd.Stdout = output
 	started := time.Now()
 	runErr := cmd.Run()
@@ -193,4 +193,17 @@ func (t probeTarget) failedTurn(ctx context.Context, latency time.Duration) cont
 		return contracts.ProbeReport{State: contracts.HealthDegraded, Latency: latency, Detail: contracts.Notice{Code: contracts.CodeHealthRateLimited}}
 	}
 	return withLatency(unreachable(contracts.HealthDown, reasonTurnFailed), latency)
+}
+
+type tailBuffer struct {
+	limit int
+	buf   []byte
+}
+
+func (b *tailBuffer) Write(data []byte) (int, error) {
+	b.buf = append(b.buf, data...)
+	if excess := len(b.buf) - b.limit; excess > 0 {
+		b.buf = append(b.buf[:0], b.buf[excess:]...)
+	}
+	return len(data), nil
 }

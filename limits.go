@@ -96,11 +96,8 @@ func (r rateLimitsResponse) snapshots() []rateLimitSnapshot {
 }
 
 func (s rateLimitSnapshot) scope() string {
-	switch {
-	case s.LimitID == "" || s.LimitID == accountLimitID:
+	if s.LimitID == accountLimitID {
 		return ""
-	case s.LimitName != "":
-		return s.LimitName
 	}
 	return s.LimitID
 }
