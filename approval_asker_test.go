@@ -272,6 +272,31 @@ func TestGatedEnvironmentStartsOnRequestWithoutAsker(t *testing.T) {
 	}
 }
 
+func TestOneShotRefusesAnAskerTurnWithoutRunningTheCommand(t *testing.T) {
+	ran := false
+	o := &oneShotResponder{run: func(context.Context, contracts.Prompt) (string, error) {
+		ran = true
+		return "ran", nil
+	}}
+	_, err := o.Respond(withAsker(context.Background(), answerWith(contracts.DecisionAllow, nil)), contracts.Prompt{}, nil)
+	if !errors.Is(err, errUngatedSession) {
+		t.Fatalf("err = %v, want errUngatedSession", err)
+	}
+	if ran {
+		t.Fatal("the one-shot command ran for a turn that carried an asker")
+	}
+}
+
+func TestOneShotRunsATurnWithoutAnAsker(t *testing.T) {
+	o := &oneShotResponder{run: func(context.Context, contracts.Prompt) (string, error) {
+		return "ran", nil
+	}}
+	text, err := o.Respond(context.Background(), contracts.Prompt{}, nil)
+	if err != nil || text != "ran" {
+		t.Fatalf("Respond = %q, %v; want ran, nil", text, err)
+	}
+}
+
 func TestAskerTurnOnAnUngatedSessionIsRefused(t *testing.T) {
 	r := &streamResponder{sess: newAppSession(brokenWriteCloser{err: errNoWrite}, strings.NewReader(""))}
 	ctx := withAsker(context.Background(), answerWith(contracts.DecisionAllow, nil))

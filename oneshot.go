@@ -14,6 +14,9 @@ type oneShotResponder struct {
 }
 
 func (o *oneShotResponder) Respond(ctx context.Context, p contracts.Prompt, _ func(contracts.BackendEvent)) (string, error) {
+	if _, asked := contracts.ApprovalAskerFrom(ctx); asked {
+		return "", errUngatedSession
+	}
 	return o.run(ctx, p)
 }
 
