@@ -154,6 +154,43 @@ func TestRequestWithoutTurnIdIsDeclinedWithAWarningAndNoAskerCall(t *testing.T) 
 	}
 }
 
+func TestServerRequestWithoutTurnIdThatIsNotAnApprovalKeepsItsHandling(t *testing.T) {
+	lines := `{"method":"turn/started","params":{"threadId":"t1","turn":{"id":"turn-1"}}}
+{"id":9,"method":"item/tool/requestUserInput","params":{"threadId":"t1","itemId":"item-1"}}
+{"method":"turn/completed","params":{"threadId":"t1","turn":{"id":"turn-1"}}}
+`
+	t.Run("without an approver or an asker it is accepted as before", func(t *testing.T) {
+		var sent []map[string]any
+		var err error
+		warnings := captureStderr(t, func() {
+			_, err = readTurn(context.Background(), bufio.NewReader(strings.NewReader(lines)), turnScope{threadID: "t1"}, nil, nil, collectReplies(&sent))
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := onlyDecision(t, sent); got != "accept" {
+			t.Fatalf("decision = %q, want accept", got)
+		}
+		if warnings != "" {
+			t.Fatalf("a request that is not an approval was warned about: %q", warnings)
+		}
+	})
+	t.Run("with a turn's asker it is declined as before, the asker not called", func(t *testing.T) {
+		var seen []contracts.ApprovalRequest
+		var sent []map[string]any
+		ctx := withAsker(context.Background(), answerWith(contracts.DecisionAllow, &seen))
+		if _, err := readTurn(ctx, bufio.NewReader(strings.NewReader(lines)), turnScope{threadID: "t1"}, nil, nil, collectReplies(&sent)); err != nil {
+			t.Fatal(err)
+		}
+		if len(seen) != 0 {
+			t.Fatalf("the asker was called %d times for an unrecognised request", len(seen))
+		}
+		if got := onlyDecision(t, sent); got != "decline" {
+			t.Fatalf("decision = %q, want decline", got)
+		}
+	})
+}
+
 func TestParkedRequestIsDeclinedAtEOFWithAReadFailure(t *testing.T) {
 	lines := `{"id":9,"method":"item/commandExecution/requestApproval","params":{"threadId":"t1","turnId":"turn-1","itemId":"item-1","command":"ls"}}` + "\n"
 	var seen []contracts.ApprovalRequest

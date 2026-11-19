@@ -104,7 +104,7 @@ func (c *turnCollector) answerRequest(ctx context.Context, msg map[string]any, a
 		}
 	}
 	turn := turnIDOf(params)
-	if turn == "" {
+	if turn == "" && looksLikeApprovalRequest(method) {
 		c.warner.warnDeclined(causeNoTurnID, method)
 		return respondHoldingSendLock(approvalResponse(msg[fieldID], false))
 	}

@@ -88,8 +88,9 @@ declines every request.
   thread id (no turn has run yet) there is nothing to resume, so the turn is refused
   with `errUngatedSession`.
 - **A rebuilt session is gated from its first turn.** A responder rebuilt from a
-  resume id opens on `on-request` when the turn that opens it carries an asker.
-  the herrscher-transport v0.7.0 or later server sets an asker on every remote turn; an older server sets none and the session stays closed.
+  resume id opens on `on-request` when the turn that opens it carries an asker. The
+  herrscher-transport v0.7.0 or later server sets an asker on every remote turn; an
+  older server sets none, and the session stays closed.
 - **Compaction is not refused for lack of an asker.** `Compact` relaunches a `never` session the same way `Respond` does when its turn carries an asker, and refuses with `errUngatedSession` only when that session has no thread. It never applies `errApprovalChannelLost`: a session that an asker put on `on-request` keeps that policy, and a compaction without an asker runs on it. Any approval request that arrives during such a compaction is declined without calling any asker.
 - **The oneshot path.** `codex exec` has no session to resume. A local oneshot run with an approval environment gate warns on stderr (`warnOneShotUngated`) and runs the command ungated. A remote run, whose turn carries an asker, is refused with `errUngatedSession` before the command runs.
 
@@ -110,10 +111,11 @@ the reading turn has learned its own id (from the response to `turn/start`, from
 is learned, a parked request naming that turn is served by the asker in arrival
 order, and a parked request naming another turn is declined. A request beyond the
 bound is declined at once. A turn that ends with requests still parked declines them
-all. A request with no `turnId`, or with an empty one, is refused whatever the
-session: the asker is not called, and the refusal is logged with a warning. Warnings
-are deduplicated per session when the session has an approver, and per turn
-otherwise.
+all. An approval request with no `turnId`, or with an empty one, is refused whatever
+the session: the asker is not called, and the refusal is logged with a warning.
+Warnings are deduplicated per session when the session has an approver, and per turn
+otherwise. Other server requests without a turn id keep the handling they had before
+this change: they are not refused for lacking a turn id.
 
 Unrecognised approval requests are declined and logged with a warning
 (`unrecognised approval request`), deduplicated in the same way. They are accepted
