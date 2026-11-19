@@ -89,14 +89,9 @@ declines every request.
   with `errUngatedSession`.
 - **A rebuilt session is gated from its first turn.** A responder rebuilt from a
   resume id opens on `on-request` when the turn that opens it carries an asker.
-  Remote turns always carry an asker: the daemon uses `RespondWithApprovals` from
-  herrscher-transport v0.7.0, so a reconstructed remote session is gated from its
-  first turn.
-- **Compaction follows the same rules.** `Compact` applies the same checks as
-  `Respond` before it compacts, so an asker on a `never` session relaunches or is
-  refused in the same way.
-- **The oneshot path refuses an asker.** `codex exec` has no session to resume, so a
-  turn carrying an asker is refused with `errUngatedSession` before the command runs.
+  le serveur herrscher-transport v0.7.0 ou plus récent pose un asker sur chaque tour distant ; un serveur plus ancien n'en pose pas et la session reste fermée.
+- **Compaction is not refused for lack of an asker.** `Compact` relaunches a `never` session the same way `Respond` does when its turn carries an asker, and refuses with `errUngatedSession` only when that session has no thread. It never applies `errApprovalChannelLost`: a session that an asker put on `on-request` keeps that policy, and a compaction without an asker runs on it. Any approval request that arrives during such a compaction is declined without calling any asker.
+- **The oneshot path.** `codex exec` has no session to resume. A local oneshot run with an approval environment gate warns on stderr (`warnOneShotUngated`) and runs the command ungated. A remote run, whose turn carries an asker, is refused with `errUngatedSession` before the command runs.
 
 Each request gets an id built from its method and the fields it carries (request
 id, thread, turn, item), joined with `/` and with no empty segment, for example
@@ -108,12 +103,16 @@ asker.
 
 A request whose `threadId` is not the thread of the turn reading it, or that carries
 no `threadId`, is declined with a logged error and the asker is not called. A
-request that codex sends between two turns on the session's thread stays served by
-the turn that reads it, with that turn's asker.
+request whose `turnId` is not the id of the turn reading it is declined without calling
+the asker, so no turn approves another turn's request. This covers a request sent
+before the reading turn has learned its own id, and a request left over from a
+previous turn. A request with no `turnId` is served by the turn that reads it, with
+that turn's asker.
 
 Unrecognised approval requests are declined with a single warning per method when
-an approver or a turn's asker is present, and accepted only when the session is
-ungated and the turn has no asker. A nil approver with no asker allows the request:
+an approver or a turn's asker is present. When the session has no approver, the
+warnings are kept by the turn that reads the requests, so each method warns once per
+turn. They are accepted only when the session is ungated and the turn has no asker. A nil approver with no asker allows the request:
 only a request on a `never` session can reach that path, since an `on-request`
 session always has an approver or an asker.
 
