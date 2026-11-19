@@ -89,7 +89,7 @@ declines every request.
   with `errUngatedSession`.
 - **A rebuilt session is gated from its first turn.** A responder rebuilt from a
   resume id opens on `on-request` when the turn that opens it carries an asker.
-  le serveur herrscher-transport v0.7.0 ou plus récent pose un asker sur chaque tour distant ; un serveur plus ancien n'en pose pas et la session reste fermée.
+  the herrscher-transport v0.7.0 or later server sets an asker on every remote turn; an older server sets none and the session stays closed.
 - **Compaction is not refused for lack of an asker.** `Compact` relaunches a `never` session the same way `Respond` does when its turn carries an asker, and refuses with `errUngatedSession` only when that session has no thread. It never applies `errApprovalChannelLost`: a session that an asker put on `on-request` keeps that policy, and a compaction without an asker runs on it. Any approval request that arrives during such a compaction is declined without calling any asker.
 - **The oneshot path.** `codex exec` has no session to resume. A local oneshot run with an approval environment gate warns on stderr (`warnOneShotUngated`) and runs the command ungated. A remote run, whose turn carries an asker, is refused with `errUngatedSession` before the command runs.
 
