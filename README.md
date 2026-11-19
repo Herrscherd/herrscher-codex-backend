@@ -110,15 +110,16 @@ the reading turn has learned its own id (from the response to `turn/start`, from
 is learned, a parked request naming that turn is served by the asker in arrival
 order, and a parked request naming another turn is declined. A request beyond the
 bound is declined at once. A turn that ends with requests still parked declines them
-all. A request with no `turnId` is refused: the asker is not called, and the
-refusal is logged with a warning, once per method.
+all. A request with no `turnId`, or with an empty one, is refused whatever the
+session: the asker is not called, and the refusal is logged with a warning. Warnings
+are deduplicated per session when the session has an approver, and per turn
+otherwise.
 
-Unrecognised approval requests are declined with a single warning per method when
-an approver or a turn's asker is present. When the session has no approver, the
-warnings are kept by the turn that reads the requests, so each method warns once per
-turn. They are accepted only when the session is ungated and the turn has no asker. A nil approver with no asker allows the request:
-only a request on a `never` session can reach that path, since an `on-request`
-session always has an approver or an asker.
+Unrecognised approval requests are declined and logged with a warning
+(`unrecognised approval request`), deduplicated in the same way. They are accepted
+only when the session is ungated and the turn has no asker: a nil approver with no
+asker allows the request. Only a request on a `never` session can reach that path,
+since an `on-request` session always has an approver or an asker.
 
 The `neublox` MCP tools are auto-approved by `default_tools_approval_mode="approve"`
 in the app-server arguments. They never reach the asker or the approval

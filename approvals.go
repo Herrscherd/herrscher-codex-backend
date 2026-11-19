@@ -21,7 +21,7 @@ type approver struct {
 	session, bin string
 	warn         io.Writer
 	warnMu       sync.Mutex
-	warned       map[string]bool
+	warned       map[declineWarning]bool
 	ask          func(ctx context.Context, bin string, argv []string) ([]byte, error)
 }
 
@@ -218,7 +218,7 @@ func (a *approver) unrecognisedAllowed(ctx context.Context, method string) bool 
 	if a == nil {
 		return true
 	}
-	a.warnDeclinedApproval(method)
+	a.warnDeclined(causeUnrecognised, method)
 	return false
 }
 
@@ -226,24 +226,51 @@ func looksLikeApprovalRequest(method string) bool {
 	return strings.HasSuffix(method, "requestApproval") || strings.HasSuffix(method, "Approval")
 }
 
-func (a *approver) warnDeclinedApproval(method string) {
+type declineCause int
+
+const (
+	causeUnrecognised declineCause = iota + 1
+	causeNoTurnID
+)
+
+type declineWarning struct {
+	cause  declineCause
+	method string
+}
+
+func (c declineCause) message(method, session string) string {
+	if c == causeNoTurnID {
+		return fmt.Sprintf("herrscher: approval request %q declined: it carries no turn id\n", method)
+	}
+	return fmt.Sprintf("herrscher: unrecognised approval request %q declined in session %q\n", method, session)
+}
+
+func (a *approver) warnDeclined(cause declineCause, method string) {
 	if a == nil || !looksLikeApprovalRequest(method) {
 		return
 	}
 	a.warnMu.Lock()
 	defer a.warnMu.Unlock()
-	if a.warned[method] {
+	key := declineWarning{cause: cause, method: method}
+	if a.warned[key] {
 		return
 	}
 	if a.warned == nil {
-		a.warned = make(map[string]bool)
+		a.warned = make(map[declineWarning]bool)
 	}
-	a.warned[method] = true
+	a.warned[key] = true
 	writer := a.warn
 	if writer == nil {
 		writer = os.Stderr
 	}
-	writeWarning(writer, fmt.Sprintf("herrscher: approval request %q declined in session %q\n", method, a.session))
+	writeWarning(writer, cause.message(method, a.session))
+}
+
+func warnerFor(approvals *approver) *approver {
+	if approvals != nil {
+		return approvals
+	}
+	return &approver{warn: os.Stderr}
 }
 
 func approverFromEnv() *approver { return newApprover(os.Getenv) }

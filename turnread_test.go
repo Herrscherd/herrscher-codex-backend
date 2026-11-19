@@ -171,37 +171,70 @@ func TestParkedRequestIsDeclinedAtEOFWithAReadFailure(t *testing.T) {
 	}
 }
 
-func TestParkedRequestDoesNotBlockWhenTheContextIsCancelled(t *testing.T) {
+func TestParkedRequestDoesNotBlockAwaitTurnWhenTheContextIsCancelled(t *testing.T) {
 	var seen []contracts.ApprovalRequest
-	var sent []map[string]any
 	ctx, cancel := context.WithCancel(withAsker(context.Background(), answerWith(contracts.DecisionAllow, &seen)))
 	defer cancel()
 	reader, writer := io.Pipe()
+	t.Cleanup(func() { closeLogged(t, writer.Close) })
+	session := newAppSession(nopWriteCloser{io.Discard}, reader)
+	request := `{"id":9,"method":"item/commandExecution/requestApproval","params":{"threadId":"t1","turnId":"turn-1","itemId":"item-1","command":"ls"}}` + "\n"
+	written := make(chan error, 1)
 	go func() {
-		_, writeErr := io.WriteString(writer, `{"id":9,"method":"item/commandExecution/requestApproval","params":{"threadId":"t1","turnId":"turn-1","itemId":"item-1","command":"ls"}}`+"\n")
-		cancel()
-		if closeErr := writer.CloseWithError(writeErr); closeErr != nil {
-			t.Error(closeErr)
-		}
+		_, err := io.WriteString(writer, request)
+		written <- err
 	}()
-	done := make(chan error, 1)
+	outcome := make(chan error, 1)
 	go func() {
-		_, err := readTurn(ctx, bufio.NewReader(reader), turnScope{threadID: "t1"}, nil, nil, collectReplies(&sent))
-		done <- err
+		_, err := session.awaitTurn(ctx, turnScope{threadID: "t1"}, nil)
+		outcome <- err
 	}()
 	select {
-	case err := <-done:
-		if err == nil {
-			t.Fatal("a turn cut off before its end reported no failure")
+	case err := <-written:
+		if err != nil {
+			t.Fatal(err)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("readTurn blocked after the context was cancelled")
+		t.Fatal("awaitTurn never read the request")
+	}
+	cancel()
+	select {
+	case err := <-outcome:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err = %v, want the context cancellation", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("awaitTurn blocked after the context was cancelled with a request parked")
 	}
 	if len(seen) != 0 {
 		t.Fatalf("the asker was called %d times for a parked request", len(seen))
 	}
-	if got := onlyDecision(t, sent); got != "decline" {
-		t.Fatalf("decision = %q, want decline", got)
+}
+
+func TestRequestWithoutTurnIdIsDeclinedWithoutAnApproverOrAsker(t *testing.T) {
+	lines := `{"method":"turn/started","params":{"threadId":"t1","turn":{"id":"turn-1"}}}
+{"id":9,"method":"item/commandExecution/requestApproval","params":{"threadId":"t1","itemId":"item-1","command":"ls"}}
+{"id":10,"method":"item/commandExecution/requestApproval","params":{"threadId":"t1","turnId":"","itemId":"item-2","command":"pwd"}}
+{"method":"turn/completed","params":{"threadId":"t1","turn":{"id":"turn-1"}}}
+`
+	var sent []map[string]any
+	var err error
+	warnings := captureStderr(t, func() {
+		_, err = readTurn(context.Background(), bufio.NewReader(strings.NewReader(lines)), turnScope{threadID: "t1"}, nil, nil, collectReplies(&sent))
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sent) != 2 {
+		t.Fatalf("sent %d replies, want 2", len(sent))
+	}
+	for _, reply := range sent {
+		if got := mapField(reply, fieldResult)["decision"]; got != "decline" {
+			t.Fatalf("decision = %v, want decline", got)
+		}
+	}
+	if n := strings.Count(warnings, "item/commandExecution/requestApproval"); n != 1 {
+		t.Fatalf("%d warnings for requests without turnId, want 1: %q", n, warnings)
 	}
 }
 

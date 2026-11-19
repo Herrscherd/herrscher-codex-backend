@@ -26,6 +26,7 @@ const (
 type turnCollector struct {
 	scope          turnScope
 	onEvent        func(contracts.BackendEvent)
+	warner         *approver
 	turnID         string
 	parked         []map[string]any
 	parkedRequests []map[string]any
@@ -36,7 +37,7 @@ type turnCollector struct {
 
 func readTurn(ctx context.Context, reader *bufio.Reader, scope turnScope, onEvent func(contracts.BackendEvent), approvals *approver, respondHoldingSendLock func(map[string]any) error) (turnResult, error) {
 	approvals = approvalsForTurn(ctx, approvals)
-	collector := &turnCollector{scope: scope, onEvent: onEvent}
+	collector := &turnCollector{scope: scope, onEvent: onEvent, warner: warnerFor(approvals)}
 	result, err := collector.read(ctx, reader, approvals, respondHoldingSendLock)
 	if declined := collector.declineParkedRequests(respondHoldingSendLock); declined != nil {
 		err = errors.Join(err, declined)
@@ -103,8 +104,8 @@ func (c *turnCollector) answerRequest(ctx context.Context, msg map[string]any, a
 		}
 	}
 	turn := turnIDOf(params)
-	if turn == "" && approvals != nil {
-		approvals.warnDeclinedApproval(method)
+	if turn == "" {
+		c.warner.warnDeclined(causeNoTurnID, method)
 		return respondHoldingSendLock(approvalResponse(msg[fieldID], false))
 	}
 	if turn != "" && c.turnID == "" {
