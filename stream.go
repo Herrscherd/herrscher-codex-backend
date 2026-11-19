@@ -83,6 +83,9 @@ func (r *streamResponder) Respond(ctx context.Context, prompt contracts.Prompt, 
 			return "", err
 		}
 	}
+	if _, asked := contracts.ApprovalAskerFrom(ctx); asked && r.sess.approvalsIfGated == nil {
+		return "", errUngatedSession
+	}
 	content := withContext(prompt.Context, withAttachments(prompt.Content, prompt.Attachments))
 	result, err := r.sess.Send(ctx, content, onEvent)
 	if err != nil {
@@ -105,6 +108,9 @@ func (r *streamResponder) open(ctx context.Context, resume string) error {
 		return err
 	}
 	r.sess = session
+	if session.approvalsIfGated != nil {
+		r.approvalsIfGated = session.approvalsIfGated
+	}
 	r.rememberToken(session.threadID)
 	return nil
 }
@@ -310,6 +316,7 @@ func (s *appSession) initialize(resume string) error {
 }
 
 func startAppSession(lifetimeCtx, turnCtx context.Context, base []string, model, effort, dir string, verbose bool, resume string, env map[string]string, approvals *approver) (*appSession, error) {
+	approvals = approvalsForTurn(turnCtx, approvals)
 	argv := appServerArgv(base, approvals != nil)
 	cmd := exec.CommandContext(lifetimeCtx, argv[0], argv[1:]...)
 	cmd.Dir = dir

@@ -39,6 +39,10 @@ func runApprove(ctx context.Context, bin string, argv []string) ([]byte, error) 
 var (
 	errVerdictUnreadable = errors.New("the approver answer is not a verdict")
 	errVerdictMissing    = errors.New("the approver answer names no decision")
+	errNoApprovalChannel = errors.New("the session has no approver and the turn carries no daemon asker")
+	errAnswerUnreadable  = errors.New("the daemon answer names no decision")
+	errAnswerMismatch    = errors.New("the daemon answered another approval request")
+	errUngatedSession    = errors.New("codex session was started without approvals, so a turn that asks for approval cannot be gated")
 )
 
 func (a *approver) allow(ctx context.Context, tool, subject string) bool {
@@ -54,6 +58,9 @@ func (a *approver) allow(ctx context.Context, tool, subject string) bool {
 }
 
 func (a *approver) decide(ctx context.Context, tool, subject string) (string, error) {
+	if a.ask == nil {
+		return "", errNoApprovalChannel
+	}
 	out, err := a.ask(ctx, a.bin, []string{
 		"approve", "ask",
 		"--session", a.session,
@@ -73,6 +80,40 @@ func (a *approver) decide(ctx context.Context, tool, subject string) (string, er
 		return "", errVerdictMissing
 	}
 	return verdict.Decision, nil
+}
+
+func (a *approver) verdict(ctx context.Context, requestID string, request approvalRequest) bool {
+	asker, asked := contracts.ApprovalAskerFrom(ctx)
+	if !asked {
+		return a.allow(ctx, request.tool, request.subject)
+	}
+	return askDaemon(ctx, asker, requestID, request)
+}
+
+func askDaemon(ctx context.Context, asker contracts.ApprovalAsker, requestID string, request approvalRequest) bool {
+	answer, err := requestFromDaemon(ctx, asker, requestID, request)
+	if err != nil {
+		slog.Error("approval declined: the daemon did not answer", "tool", request.tool, "error", err)
+		return false
+	}
+	return answer.Allowed()
+}
+
+func requestFromDaemon(ctx context.Context, asker contracts.ApprovalAsker, requestID string, request approvalRequest) (contracts.ApprovalAnswer, error) {
+	if err := ctx.Err(); err != nil {
+		return contracts.ApprovalAnswer{}, err
+	}
+	answer := asker(ctx, contracts.ApprovalRequest{ID: requestID, Tool: request.tool, Subject: request.subject})
+	if err := ctx.Err(); err != nil {
+		return contracts.ApprovalAnswer{}, err
+	}
+	if answer.ID != requestID {
+		return contracts.ApprovalAnswer{}, errAnswerMismatch
+	}
+	if _, err := contracts.ParseApprovalDecision(string(answer.Decision)); err != nil {
+		return contracts.ApprovalAnswer{}, fmt.Errorf("%w: %w", errAnswerUnreadable, err)
+	}
+	return answer, nil
 }
 
 type approvalRequest struct {
@@ -95,6 +136,10 @@ func approvalSubject(method string, params map[string]any) (approvalRequest, boo
 	return approvalRequest{}, false
 }
 
+func approvalID(requestID any, params map[string]any) string {
+	return fmt.Sprintf("%v/%s/%s/%s", requestID, stringField(params, fieldThreadID), turnIDOf(params), stringField(params, fieldItemID))
+}
+
 func approvalResponse(requestID any, allow bool) map[string]any {
 	decision := "decline"
 	if allow {
@@ -110,18 +155,28 @@ func approvalPolicy(gated bool) string {
 	return "never"
 }
 
+func approvalsForTurn(turnCtx context.Context, approvals *approver) *approver {
+	if approvals != nil {
+		return approvals
+	}
+	if _, asked := contracts.ApprovalAskerFrom(turnCtx); asked {
+		return &approver{warn: os.Stderr}
+	}
+	return nil
+}
+
 func answerApproval(ctx context.Context, msg map[string]any, requestID any, approvals *approver, respondHoldingSendLock func(map[string]any) error) error {
 	method := stringField(msg, fieldMethod)
 	params := mapField(msg, fieldParams)
 	request, known := approvalSubject(method, params)
 	if !known {
-		return respondHoldingSendLock(approvalResponse(requestID, approvals.unrecognisedAllowed(method)))
+		return respondHoldingSendLock(approvalResponse(requestID, approvals.unrecognisedAllowed(ctx, method)))
 	}
-	return respondHoldingSendLock(approvalResponse(requestID, approvals.allow(ctx, request.tool, request.subject)))
+	return respondHoldingSendLock(approvalResponse(requestID, approvals.verdict(ctx, approvalID(requestID, params), request)))
 }
 
-func (a *approver) unrecognisedAllowed(method string) bool {
-	if a == nil {
+func (a *approver) unrecognisedAllowed(ctx context.Context, method string) bool {
+	if _, asked := contracts.ApprovalAskerFrom(ctx); a == nil && !asked {
 		return true
 	}
 	a.warnUnrecognisedApproval(method)

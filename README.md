@@ -50,11 +50,39 @@ one of the declared, env-backed settings.
 per message, and additionally exports `DCTL_MSG`, `DCTL_AUTHOR`,
 `DCTL_MESSAGE_ID`, `DCTL_CHANNEL` and `DCTL_ATTACHMENTS` to the child.
 
-Both modes run headless: `approval_policy="never"`,
-`sandbox_mode="workspace-write"`, and the `neublox` MCP auto-approved. Any
+Both modes run headless with `sandbox_mode="workspace-write"` and the `neublox`
+MCP auto-approved. An ungated session runs `approval_policy="never"`; a gated one
+runs `on-request` and answers each approval (see [Approvals](#approvals)). Any
 `--model` or `--effort` inside `CODEX_CMD` is lifted out of the argv and sent as a
 turn parameter instead, because the Codex CLI rejects those flags before
 `app-server`.
+
+## Approvals
+
+A tool call that the agent wants to run is gated in one of two ways, and a turn
+never runs an approval-gated tool without an answer.
+
+- **The turn's asker.** When the turn's context carries a `contracts.ApprovalAsker`
+  (`contracts.WithApprovalAsker`), each request is sent to the daemon as a
+  `contracts.ApprovalRequest` with its own ID, the tool and the subject, and the
+  answer with the same ID decides it. Only an `allow` runs the tool. A denial is
+  declined. An error, an answer carrying another ID, or a turn that ends before
+  the answer is also declined, and logged. The request carries no session name and no token: the
+  daemon answers from its own machine, and the session token
+  (`HERRSCHER_SESSION_TOKEN`) never takes this path.
+- **The approval sub-process.** Without an asker, a session gated by the approval
+  environment runs `herrscher approve ask --session ...`, which inherits the
+  session token as before. Its answer decides the request.
+
+A session is gated when its app-server starts while the turn carries an asker, or
+when the approval environment gates it. A gated session stays gated when it
+restarts. A turn that carries an asker on a session started ungated is refused
+with an error instead of running without approval, so start a new session to gate
+it. A turn without an asker on a gated session that has no approval environment
+declines every request.
+
+Unrecognised approval requests are declined with a single warning per method when
+the session is gated, and accepted when it is not, as before.
 
 ## Compaction
 
