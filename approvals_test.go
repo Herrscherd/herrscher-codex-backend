@@ -163,7 +163,7 @@ func TestAnswerApprovalAlwaysReplies(t *testing.T) {
 	a := &approver{session: "api", ask: func(context.Context, string, []string) ([]byte, error) {
 		return []byte(`{"decision":"deny"}`), nil
 	}}
-	if err := answerApproval(context.Background(), map[string]any{"method": "item/somethingNew/requestApproval"}, 1, a, respond); err != nil {
+	if err := answerApproval(context.Background(), map[string]any{"method": "item/somethingNew/requestApproval"}, float64(1), a, respond); err != nil {
 		t.Fatal(err)
 	}
 	if err := answerApproval(context.Background(), map[string]any{
@@ -249,7 +249,7 @@ func TestUnrecognisedRequestIsDeclinedInAGatedSession(t *testing.T) {
 		var sent []map[string]any
 		a := &approver{session: "api"}
 		respond := func(m map[string]any) error { sent = append(sent, m); return nil }
-		if err := answerApproval(context.Background(), map[string]any{"method": method}, 1, a, respond); err != nil {
+		if err := answerApproval(context.Background(), map[string]any{"method": method}, float64(1), a, respond); err != nil {
 			t.Fatal(err)
 		}
 		if got := mapField(sent[0], "result")["decision"]; got != "decline" {
@@ -261,7 +261,7 @@ func TestUnrecognisedRequestIsDeclinedInAGatedSession(t *testing.T) {
 func TestUnrecognisedRequestIsAcceptedWhenUngated(t *testing.T) {
 	var sent []map[string]any
 	respond := func(m map[string]any) error { sent = append(sent, m); return nil }
-	if err := answerApproval(context.Background(), map[string]any{"method": "item/somethingNew/requestApproval"}, 1, nil, respond); err != nil {
+	if err := answerApproval(context.Background(), map[string]any{"method": "item/somethingNew/requestApproval"}, float64(1), nil, respond); err != nil {
 		t.Fatal(err)
 	}
 	if got := mapField(sent[0], "result")["decision"]; got != "accept" {
@@ -284,10 +284,10 @@ func TestAnswerApprovalWarnsOnceOnUnrecognisedApprovalRequest(t *testing.T) {
 			var warned strings.Builder
 			a := &approver{session: "api", warn: &warned}
 			respond := func(map[string]any) error { return nil }
-			if err := answerApproval(context.Background(), map[string]any{"method": tc.method}, 1, a, respond); err != nil {
+			if err := answerApproval(context.Background(), map[string]any{"method": tc.method}, float64(1), a, respond); err != nil {
 				t.Fatal(err)
 			}
-			if err := answerApproval(context.Background(), map[string]any{"method": tc.method}, 2, a, respond); err != nil {
+			if err := answerApproval(context.Background(), map[string]any{"method": tc.method}, float64(2), a, respond); err != nil {
 				t.Fatal(err)
 			}
 			got := strings.Contains(warned.String(), tc.method)
@@ -307,7 +307,7 @@ func TestAnswerApprovalReturnsRespondError(t *testing.T) {
 		return []byte(`{"decision":"allow"}`), nil
 	}}
 	respond := func(map[string]any) error { return sentinel }
-	if err := answerApproval(context.Background(), map[string]any{"method": "item/somethingNew/requestApproval"}, 1, a, respond); !errors.Is(err, sentinel) {
+	if err := answerApproval(context.Background(), map[string]any{"method": "item/somethingNew/requestApproval"}, float64(1), a, respond); !errors.Is(err, sentinel) {
 		t.Fatalf("err=%v, want the respond error", err)
 	}
 }

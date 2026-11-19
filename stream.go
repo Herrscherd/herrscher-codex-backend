@@ -60,8 +60,8 @@ func (r *streamResponder) Respond(ctx context.Context, prompt contracts.Prompt, 
 			return "", err
 		}
 	}
-	if _, asked := contracts.ApprovalAskerFrom(ctx); asked && r.sess.approvalsIfGated == nil {
-		return "", errUngatedSession
+	if err := r.prepareTurn(ctx); err != nil {
+		return "", err
 	}
 	content := withContext(prompt.Context, withAttachments(prompt.Content, prompt.Attachments))
 	result, err := r.sess.Send(ctx, content, onEvent)
@@ -77,6 +77,32 @@ func (r *streamResponder) Respond(ctx context.Context, prompt contracts.Prompt, 
 		return result.Text, fmt.Errorf("%w: %s", errTurnFailed, result.ErrMsg)
 	}
 	return result.Text, nil
+}
+
+func (r *streamResponder) prepareTurn(ctx context.Context) error {
+	_, asked := contracts.ApprovalAskerFrom(ctx)
+	if asked && r.sess.approvalsIfGated == nil {
+		if r.sess.threadID == "" {
+			return errUngatedSession
+		}
+		r.dropSession()
+		if err := r.open(ctx, r.resumeID); err != nil {
+			return err
+		}
+	}
+	return r.admit(ctx)
+}
+
+func (r *streamResponder) admit(ctx context.Context) error {
+	_, asked := contracts.ApprovalAskerFrom(ctx)
+	gate := r.sess.approvalsIfGated
+	if asked && gate == nil {
+		return errUngatedSession
+	}
+	if !asked && gate != nil && !gate.hasChannel() {
+		return errApprovalChannelLost
+	}
+	return nil
 }
 
 func (r *streamResponder) open(ctx context.Context, resume string) error {

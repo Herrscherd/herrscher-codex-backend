@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -37,13 +38,19 @@ func runApprove(ctx context.Context, bin string, argv []string) ([]byte, error) 
 }
 
 var (
-	errVerdictUnreadable = errors.New("the approver answer is not a verdict")
-	errVerdictMissing    = errors.New("the approver answer names no decision")
-	errNoApprovalChannel = errors.New("the session has no approver and the turn carries no daemon asker")
-	errAnswerUnreadable  = errors.New("the daemon answer names no decision")
-	errAnswerMismatch    = errors.New("the daemon answered another approval request")
-	errUngatedSession    = errors.New("codex session was started without approvals, so a turn that asks for approval cannot be gated")
+	errVerdictUnreadable   = errors.New("the approver answer is not a verdict")
+	errVerdictMissing      = errors.New("the approver answer names no decision")
+	errNoApprovalChannel   = errors.New("the session has no approver and the turn carries no daemon asker")
+	errAnswerUnreadable    = errors.New("the daemon answer names no decision")
+	errAnswerMismatch      = errors.New("the daemon answered another approval request")
+	errUngatedSession      = errors.New("codex session was started without approvals, so a turn that asks for approval cannot be gated")
+	errApprovalIDUnusable  = errors.New("the approval request carries no usable id")
+	errApprovalChannelLost = errors.New("codex session was put on approval by a turn's asker, and this turn carries no asker or approver")
 )
+
+func (a *approver) hasChannel() bool {
+	return a != nil && a.ask != nil
+}
 
 func (a *approver) allow(ctx context.Context, tool, subject string) bool {
 	if a == nil {
@@ -136,8 +143,32 @@ func approvalSubject(method string, params map[string]any) (approvalRequest, boo
 	return approvalRequest{}, false
 }
 
-func approvalID(requestID any, params map[string]any) string {
-	return fmt.Sprintf("%v/%s/%s/%s", requestID, stringField(params, fieldThreadID), turnIDOf(params), stringField(params, fieldItemID))
+func approvalID(method string, requestID any, params map[string]any) (string, error) {
+	key, ok := requestKey(requestID)
+	if !ok {
+		return "", errApprovalIDUnusable
+	}
+	return strings.Join(nonEmpty(method, key, stringField(params, fieldThreadID), turnIDOf(params), stringField(params, fieldItemID)), "/"), nil
+}
+
+func requestKey(requestID any) (string, bool) {
+	switch number := requestID.(type) {
+	case float64:
+		return strconv.FormatFloat(number, 'f', -1, 64), true
+	case string:
+		return number, number != ""
+	}
+	return "", false
+}
+
+func nonEmpty(values ...string) []string {
+	kept := make([]string, 0, len(values))
+	for _, value := range values {
+		if value != "" {
+			kept = append(kept, value)
+		}
+	}
+	return kept
 }
 
 func approvalResponse(requestID any, allow bool) map[string]any {
@@ -172,12 +203,20 @@ func answerApproval(ctx context.Context, msg map[string]any, requestID any, appr
 	if !known {
 		return respondHoldingSendLock(approvalResponse(requestID, approvals.unrecognisedAllowed(ctx, method)))
 	}
-	return respondHoldingSendLock(approvalResponse(requestID, approvals.verdict(ctx, approvalID(requestID, params), request)))
+	approvalKey, err := approvalID(method, requestID, params)
+	if err != nil {
+		slog.Error("approval declined: the request carries no usable id", "method", method, "error", err)
+		return respondHoldingSendLock(approvalResponse(requestID, false))
+	}
+	return respondHoldingSendLock(approvalResponse(requestID, approvals.verdict(ctx, approvalKey, request)))
 }
 
 func (a *approver) unrecognisedAllowed(ctx context.Context, method string) bool {
 	if _, asked := contracts.ApprovalAskerFrom(ctx); a == nil && !asked {
 		return true
+	}
+	if a == nil {
+		a = &approver{warn: os.Stderr}
 	}
 	a.warnUnrecognisedApproval(method)
 	return false

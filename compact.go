@@ -91,6 +91,9 @@ func (r *streamResponder) Compact(ctx context.Context, req contracts.CompactRequ
 			return contracts.CompactResult{}, unavailable("reopening the thread", err)
 		}
 	}
+	if err := r.prepareTurn(ctx); err != nil {
+		return contracts.CompactResult{}, err
+	}
 	if err := r.sess.Compact(ctx, onEvent); err != nil {
 		if !errors.Is(err, errCompactionRejected) && !errors.Is(err, errCompactionFailed) {
 			r.dropSession()

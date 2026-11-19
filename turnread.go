@@ -63,7 +63,7 @@ func (c *turnCollector) consumeLine(ctx context.Context, line []byte, approvals 
 		return c.outcome(), true, nil
 	}
 	if isServerRequest(msg) {
-		return turnResult{}, false, answerApproval(ctx, msg, msg[fieldID], approvals, respondHoldingSendLock)
+		return turnResult{}, false, c.answerRequest(ctx, msg, approvals, respondHoldingSendLock)
 	}
 	if err := c.handleNotification(msg); err != nil {
 		return turnResult{}, true, err
@@ -72,6 +72,16 @@ func (c *turnCollector) consumeLine(ctx context.Context, line []byte, approvals 
 		return c.outcome(), true, nil
 	}
 	return turnResult{}, false, nil
+}
+
+func (c *turnCollector) answerRequest(ctx context.Context, msg map[string]any, approvals *approver, respondHoldingSendLock func(map[string]any) error) error {
+	if c.scope.threadID != "" {
+		if threadID := stringField(mapField(msg, fieldParams), fieldThreadID); threadID != c.scope.threadID {
+			slog.Error("approval declined: the request names another thread", "method", stringField(msg, fieldMethod), "expected", c.scope.threadID, "got", threadID)
+			return respondHoldingSendLock(approvalResponse(msg[fieldID], false))
+		}
+	}
+	return answerApproval(ctx, msg, msg[fieldID], approvals, respondHoldingSendLock)
 }
 
 func isServerRequest(msg map[string]any) bool {

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -88,7 +89,7 @@ func TestAskerAnswerDecidesTheTurn(t *testing.T) {
 			var sent []map[string]any
 			a := &approver{session: "api", ask: subProcessMustNotRun(t)}
 			ctx := withAsker(context.Background(), answerWith(tc.decision, &seen))
-			if err := answerApproval(ctx, commandApprovalMsg(), 9, a, collectReplies(&sent)); err != nil {
+			if err := answerApproval(ctx, commandApprovalMsg(), float64(9), a, collectReplies(&sent)); err != nil {
 				t.Fatal(err)
 			}
 			if got := onlyDecision(t, sent); got != tc.want {
@@ -104,7 +105,7 @@ func TestAskerAnswerDecidesTheTurn(t *testing.T) {
 func TestAskerAnswersTheRequestWithoutAnyApprover(t *testing.T) {
 	var sent []map[string]any
 	ctx := withAsker(context.Background(), answerWith(contracts.DecisionAllow, nil))
-	if err := answerApproval(ctx, commandApprovalMsg(), 9, nil, collectReplies(&sent)); err != nil {
+	if err := answerApproval(ctx, commandApprovalMsg(), float64(9), nil, collectReplies(&sent)); err != nil {
 		t.Fatal(err)
 	}
 	if got := onlyDecision(t, sent); got != "accept" {
@@ -128,7 +129,7 @@ func TestAskerFailuresDeclineTheTurn(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			var sent []map[string]any
 			a := &approver{session: "api", ask: subProcessMustNotRun(t)}
-			if err := answerApproval(withAsker(context.Background(), asker), commandApprovalMsg(), 9, a, collectReplies(&sent)); err != nil {
+			if err := answerApproval(withAsker(context.Background(), asker), commandApprovalMsg(), float64(9), a, collectReplies(&sent)); err != nil {
 				t.Fatal(err)
 			}
 			if got := onlyDecision(t, sent); got != "decline" {
@@ -148,7 +149,7 @@ func TestAskerIsNotTrustedOnceTheTurnEnds(t *testing.T) {
 			return contracts.ApprovalAnswer{ID: req.ID, Decision: contracts.DecisionAllow}
 		}
 		var sent []map[string]any
-		if err := answerApproval(withAsker(ctx, asker), commandApprovalMsg(), 9, nil, collectReplies(&sent)); err != nil {
+		if err := answerApproval(withAsker(ctx, asker), commandApprovalMsg(), float64(9), nil, collectReplies(&sent)); err != nil {
 			t.Fatal(err)
 		}
 		if asked {
@@ -166,7 +167,7 @@ func TestAskerIsNotTrustedOnceTheTurnEnds(t *testing.T) {
 			return contracts.ApprovalAnswer{ID: req.ID, Decision: contracts.DecisionAllow}
 		}
 		var sent []map[string]any
-		if err := answerApproval(withAsker(ctx, asker), commandApprovalMsg(), 9, nil, collectReplies(&sent)); err != nil {
+		if err := answerApproval(withAsker(ctx, asker), commandApprovalMsg(), float64(9), nil, collectReplies(&sent)); err != nil {
 			t.Fatal(err)
 		}
 		if got := onlyDecision(t, sent); got != "decline" {
@@ -186,7 +187,7 @@ func TestUnrecognisedRequestIsDeclinedWithWarningWhenAnAskerIsPresent(t *testing
 	for name, a := range cases {
 		t.Run(name, func(t *testing.T) {
 			var sent []map[string]any
-			if err := answerApproval(ctx, map[string]any{"method": method}, 1, a, collectReplies(&sent)); err != nil {
+			if err := answerApproval(ctx, map[string]any{"method": method}, float64(1), a, collectReplies(&sent)); err != nil {
 				t.Fatal(err)
 			}
 			if got := onlyDecision(t, sent); got != "decline" {
@@ -199,14 +200,141 @@ func TestUnrecognisedRequestIsDeclinedWithWarningWhenAnAskerIsPresent(t *testing
 	}
 }
 
-func TestApprovalIDIsStablePerRequest(t *testing.T) {
-	params := map[string]any{"threadId": "t1", "turnId": "turn-1", "itemId": "item-1"}
-	first := approvalID(float64(9), params)
-	if first == "" || first != approvalID(float64(9), params) {
-		t.Fatalf("the same request got ids %q and %q", first, approvalID(float64(9), params))
+func captureStderr(t *testing.T, run func()) string {
+	t.Helper()
+	read, write, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
 	}
-	if first == approvalID(float64(10), params) {
-		t.Fatal("two requests share one id")
+	t.Cleanup(func() { closeLogged(t, read.Close) })
+	saved := os.Stderr
+	os.Stderr = write
+	run()
+	os.Stderr = saved
+	if closeErr := write.Close(); closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	out, err := io.ReadAll(read)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(out)
+}
+
+func TestUnrecognisedRequestWarnsWhenNoApproverAnswersForAnAsker(t *testing.T) {
+	const method = "item/somethingNew/requestApproval"
+	ctx := withAsker(context.Background(), answerWith(contracts.DecisionAllow, nil))
+	var sent []map[string]any
+	warnings := captureStderr(t, func() {
+		if err := answerApproval(ctx, map[string]any{"method": method}, float64(1), nil, collectReplies(&sent)); err != nil {
+			t.Error(err)
+		}
+	})
+	if got := onlyDecision(t, sent); got != "decline" {
+		t.Fatalf("decision = %q, want decline", got)
+	}
+	if !strings.Contains(warnings, method) {
+		t.Fatalf("no warning named %s without an approver: %q", method, warnings)
+	}
+}
+
+func TestApprovalIDIsStablePerRequest(t *testing.T) {
+	const method = "item/commandExecution/requestApproval"
+	params := map[string]any{"threadId": "t1", "turnId": "turn-1", "itemId": "item-1"}
+	first, err := approvalID(method, float64(9), params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := approvalID(method, float64(9), params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := approvalID(method, float64(10), params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != again || first == other {
+		t.Fatalf("ids %q, %q and %q: a request keeps its id and two requests differ", first, again, other)
+	}
+}
+
+func TestApprovalIDKeepsOnlyThePresentFields(t *testing.T) {
+	id, err := approvalID("execCommandApproval", float64(7), map[string]any{"command": "ls"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != "execCommandApproval/7" {
+		t.Fatalf("id = %q, want execCommandApproval/7", id)
+	}
+}
+
+func TestNullRequestIdIsDeclinedWithoutAskingTheAsker(t *testing.T) {
+	var seen []contracts.ApprovalRequest
+	var sent []map[string]any
+	ctx := withAsker(context.Background(), answerWith(contracts.DecisionAllow, &seen))
+	msg := map[string]any{"id": nil, "method": "execCommandApproval", "params": map[string]any{"command": "rm -rf /"}}
+	if err := answerApproval(ctx, msg, nil, nil, collectReplies(&sent)); err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 0 {
+		t.Fatalf("the asker was called %d times for a request without id", len(seen))
+	}
+	if got := onlyDecision(t, sent); got != "decline" {
+		t.Fatalf("decision = %q, want decline", got)
+	}
+}
+
+func TestRequestFromAnotherThreadIsDeclinedWithoutAskingTheAsker(t *testing.T) {
+	lines := `{"method":"turn/started","params":{"threadId":"t1","turn":{"id":"turn-1"}}}
+{"id":9,"method":"item/commandExecution/requestApproval","params":{"threadId":"t2","turnId":"turn-2","itemId":"item-1","command":"rm -rf /"}}
+{"method":"turn/completed","params":{"threadId":"t1","turn":{"id":"turn-1"}}}
+`
+	var seen []contracts.ApprovalRequest
+	var sent []map[string]any
+	ctx := withAsker(context.Background(), answerWith(contracts.DecisionAllow, &seen))
+	if _, err := readTurn(ctx, bufio.NewReader(strings.NewReader(lines)), turnScope{threadID: "t1"}, nil, nil, collectReplies(&sent)); err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 0 {
+		t.Fatalf("the asker was called %d times for another thread", len(seen))
+	}
+	if got := onlyDecision(t, sent); got != "decline" {
+		t.Fatalf("decision = %q, want decline", got)
+	}
+}
+
+func TestRequestLeftBetweenTurnsIsAnsweredByTheReadingTurn(t *testing.T) {
+	lines := `{"id":9,"method":"item/commandExecution/requestApproval","params":{"threadId":"t1","turnId":"turn-1","itemId":"item-1","command":"ls"}}
+{"method":"turn/started","params":{"threadId":"t1","turn":{"id":"turn-1"}}}
+{"method":"turn/completed","params":{"threadId":"t1","turn":{"id":"turn-1"}}}
+`
+	var seen []contracts.ApprovalRequest
+	var sent []map[string]any
+	ctx := withAsker(context.Background(), answerWith(contracts.DecisionAllow, &seen))
+	if _, err := readTurn(ctx, bufio.NewReader(strings.NewReader(lines)), turnScope{threadID: "t1"}, nil, nil, collectReplies(&sent)); err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 1 {
+		t.Fatalf("the reading turn's asker was called %d times, want 1", len(seen))
+	}
+	if got := onlyDecision(t, sent); got != "accept" {
+		t.Fatalf("decision = %q, want accept", got)
+	}
+}
+
+func TestApprovalWithoutIdIsNotAnsweredNorAsked(t *testing.T) {
+	lines := `{"method":"turn/started","params":{"threadId":"t1","turn":{"id":"turn-1"}}}
+{"method":"item/commandExecution/requestApproval","params":{"threadId":"t1","turnId":"turn-1","itemId":"item-1","command":"rm -rf /"}}
+{"method":"turn/completed","params":{"threadId":"t1","turn":{"id":"turn-1"}}}
+`
+	var seen []contracts.ApprovalRequest
+	var sent []map[string]any
+	ctx := withAsker(context.Background(), answerWith(contracts.DecisionAllow, &seen))
+	if _, err := readTurn(ctx, bufio.NewReader(strings.NewReader(lines)), turnScope{threadID: "t1"}, nil, nil, collectReplies(&sent)); err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 0 || len(sent) != 0 {
+		t.Fatalf("a request without id reached the asker (%d) or got a reply (%d)", len(seen), len(sent))
 	}
 }
 

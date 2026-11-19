@@ -13,11 +13,11 @@ type oneShotResponder struct {
 	gatewayHomeRemovedOnClose string
 }
 
-func (o *oneShotResponder) Respond(ctx context.Context, p contracts.Prompt, _ func(contracts.BackendEvent)) (string, error) {
+func (o *oneShotResponder) Respond(ctx context.Context, prompt contracts.Prompt, _ func(contracts.BackendEvent)) (string, error) {
 	if _, asked := contracts.ApprovalAskerFrom(ctx); asked {
 		return "", errUngatedSession
 	}
-	return o.run(ctx, p)
+	return o.run(ctx, prompt)
 }
 
 func (o *oneShotResponder) Close() error {
