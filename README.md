@@ -74,15 +74,52 @@ never runs an approval-gated tool without an answer.
   environment runs `herrscher approve ask --session ...`, which inherits the
   session token as before. Its answer decides the request.
 
-A session is gated when its app-server starts while the turn carries an asker, or
-when the approval environment gates it. A gated session stays gated when it
-restarts. A turn that carries an asker on a session started ungated is refused
-with an error instead of running without approval, so start a new session to gate
+A session is gated when its app-server starts on `on-request`, which happens when
+the turn that starts it carries an asker or when the approval environment gates
 it. A turn without an asker on a gated session that has no approval environment
 declines every request.
 
+- **A session started by an asker stays gated.** A session that an asker turn put
+  on `on-request` refuses a later turn that carries no asker and no approval
+  environment, with `errApprovalChannelLost`. It never runs such a turn ungated.
+- **A session started ungated is relaunched.** A turn with an asker on a session
+  started on `never` closes the codex process and relaunches it on `on-request`,
+  resuming the same thread id, when that session already has a thread. Without a
+  thread id (no turn has run yet) there is nothing to resume, so the turn is refused
+  with `errUngatedSession`.
+- **A rebuilt session is gated from its first turn.** A responder rebuilt from a
+  resume id opens on `on-request` when the turn that opens it carries an asker.
+  Remote turns always carry an asker: the daemon uses `RespondWithApprovals` from
+  herrscher-transport v0.7.0, so a reconstructed remote session is gated from its
+  first turn.
+- **Compaction follows the same rules.** `Compact` applies the same checks as
+  `Respond` before it compacts, so an asker on a `never` session relaunches or is
+  refused in the same way.
+- **The oneshot path refuses an asker.** `codex exec` has no session to resume, so a
+  turn carrying an asker is refused with `errUngatedSession` before the command runs.
+
+Each request gets an id built from its method and the fields it carries (request
+id, thread, turn, item), joined with `/` and with no empty segment, for example
+`execCommandApproval/7` when only the request id is present. A request whose id is
+null, or is neither a string nor a number, is declined with a logged error and the
+asker is not called. An approval request without any id is not a server request
+(it is a notification), so it never receives an answer and never reaches the
+asker.
+
+A request whose `threadId` is not the thread of the turn reading it, or that carries
+no `threadId`, is declined with a logged error and the asker is not called. A
+request that codex sends between two turns on the session's thread stays served by
+the turn that reads it, with that turn's asker.
+
 Unrecognised approval requests are declined with a single warning per method when
-the session is gated, and accepted when it is not, as before.
+an approver or a turn's asker is present, and accepted only when the session is
+ungated and the turn has no asker. A nil approver with no asker allows the request:
+only a request on a `never` session can reach that path, since an `on-request`
+session always has an approver or an asker.
+
+The `neublox` MCP tools are auto-approved by `default_tools_approval_mode="approve"`
+in the app-server arguments. They never reach the asker or the approval
+sub-process, so the approval channel does not see them.
 
 ## Compaction
 
