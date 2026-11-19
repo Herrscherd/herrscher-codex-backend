@@ -104,10 +104,14 @@ asker.
 A request whose `threadId` is not the thread of the turn reading it, or that carries
 no `threadId`, is declined with a logged error and the asker is not called. A
 request whose `turnId` is not the id of the turn reading it is declined without calling
-the asker, so no turn approves another turn's request. This covers a request sent
-before the reading turn has learned its own id, and a request left over from a
-previous turn. A request with no `turnId` is served by the turn that reads it, with
-that turn's asker.
+the asker, so no turn approves another turn's request. A request that arrives before
+the reading turn has learned its own id (from the response to `turn/start`, from
+`turn/started`, or from a compaction item) is parked, up to 16 requests. Once the id
+is learned, a parked request naming that turn is served by the asker in arrival
+order, and a parked request naming another turn is declined. A request beyond the
+bound is declined at once. A turn that ends with requests still parked declines them
+all. A request with no `turnId` is served by the turn that reads it, with that
+turn's asker.
 
 Unrecognised approval requests are declined with a single warning per method when
 an approver or a turn's asker is present. When the session has no approver, the
