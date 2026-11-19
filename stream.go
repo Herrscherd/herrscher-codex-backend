@@ -80,6 +80,13 @@ func (r *streamResponder) Respond(ctx context.Context, prompt contracts.Prompt, 
 }
 
 func (r *streamResponder) prepareTurn(ctx context.Context) error {
+	if err := r.relaunchForAsker(ctx); err != nil {
+		return err
+	}
+	return r.admit(ctx)
+}
+
+func (r *streamResponder) relaunchForAsker(ctx context.Context) error {
 	_, asked := contracts.ApprovalAskerFrom(ctx)
 	if asked && r.sess.approvalsIfGated == nil {
 		if r.sess.threadID == "" {
@@ -90,7 +97,7 @@ func (r *streamResponder) prepareTurn(ctx context.Context) error {
 			return err
 		}
 	}
-	return r.admit(ctx)
+	return nil
 }
 
 func (r *streamResponder) admit(ctx context.Context) error {

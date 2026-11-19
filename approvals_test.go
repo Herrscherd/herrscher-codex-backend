@@ -301,6 +301,43 @@ func TestAnswerApprovalWarnsOnceOnUnrecognisedApprovalRequest(t *testing.T) {
 	}
 }
 
+func TestUnrecognisedMethodWarnsOnlyOnceInATurnWithoutAnApprover(t *testing.T) {
+	lines := `{"method":"turn/started","params":{"turn":{"id":"turn-1"}}}
+{"id":1,"method":"item/nilReceiver/requestApproval","params":{"turnId":"turn-1"}}
+{"id":2,"method":"item/nilReceiver/requestApproval","params":{"turnId":"turn-1"}}
+{"id":3,"method":"item/nilReceiver/requestApproval","params":{"turnId":"turn-1"}}
+{"method":"turn/completed","params":{"turn":{"id":"turn-1","status":"completed"}}}
+`
+	ctx := withAsker(context.Background(), answerWith(contracts.DecisionAllow, nil))
+	var sent []map[string]any
+	warnings := captureStderr(t, func() {
+		if _, err := readTurn(ctx, bufio.NewReader(strings.NewReader(lines)), turnScope{}, nil, nil, collectReplies(&sent)); err != nil {
+			t.Error(err)
+		}
+	})
+	if len(sent) != 3 {
+		t.Fatalf("answered %d of 3 requests", len(sent))
+	}
+	if got := strings.Count(warnings, "item/nilReceiver/requestApproval"); got != 1 {
+		t.Fatalf("warned %d times for one method without an approver, want 1: %q", got, warnings)
+	}
+}
+
+func TestUnrecognisedMethodWarnsOnlyOnceForAnApproverWithItsOwnWriter(t *testing.T) {
+	var warned strings.Builder
+	a := &approver{session: "api", warn: &warned}
+	respond := func(map[string]any) error { return nil }
+	for number := range 3 {
+		msg := map[string]any{"method": "item/ownWriter/requestApproval"}
+		if err := answerApproval(withAsker(context.Background(), answerWith(contracts.DecisionAllow, nil)), msg, float64(number+1), a, respond); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := strings.Count(warned.String(), "item/ownWriter/requestApproval"); got != 1 {
+		t.Fatalf("warned %d times for one method, want 1: %q", got, warned.String())
+	}
+}
+
 func TestAnswerApprovalReturnsRespondError(t *testing.T) {
 	sentinel := errors.New("respond failed")
 	a := &approver{session: "api", ask: func(context.Context, string, []string) ([]byte, error) {

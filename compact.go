@@ -91,7 +91,7 @@ func (r *streamResponder) Compact(ctx context.Context, req contracts.CompactRequ
 			return contracts.CompactResult{}, unavailable("reopening the thread", err)
 		}
 	}
-	if err := r.prepareTurn(ctx); err != nil {
+	if err := r.relaunchForAsker(ctx); err != nil {
 		return contracts.CompactResult{}, err
 	}
 	if err := r.sess.Compact(ctx, onEvent); err != nil {

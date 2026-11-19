@@ -212,11 +212,11 @@ func answerApproval(ctx context.Context, msg map[string]any, requestID any, appr
 }
 
 func (a *approver) unrecognisedAllowed(ctx context.Context, method string) bool {
-	if _, asked := contracts.ApprovalAskerFrom(ctx); a == nil && !asked {
-		return true
+	if a == nil {
+		a = approvalsForTurn(ctx, nil)
 	}
 	if a == nil {
-		a = &approver{warn: os.Stderr}
+		return true
 	}
 	a.warnUnrecognisedApproval(method)
 	return false
@@ -227,7 +227,7 @@ func looksLikeApprovalRequest(method string) bool {
 }
 
 func (a *approver) warnUnrecognisedApproval(method string) {
-	if a == nil || a.warn == nil || !looksLikeApprovalRequest(method) {
+	if a == nil || !looksLikeApprovalRequest(method) {
 		return
 	}
 	a.warnMu.Lock()
@@ -239,7 +239,11 @@ func (a *approver) warnUnrecognisedApproval(method string) {
 		a.warned = make(map[string]bool)
 	}
 	a.warned[method] = true
-	writeWarning(a.warn, fmt.Sprintf("herrscher: unrecognised approval request %q declined in session %q\n", method, a.session))
+	writer := a.warn
+	if writer == nil {
+		writer = os.Stderr
+	}
+	writeWarning(writer, fmt.Sprintf("herrscher: unrecognised approval request %q declined in session %q\n", method, a.session))
 }
 
 func approverFromEnv() *approver { return newApprover(os.Getenv) }

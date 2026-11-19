@@ -88,3 +88,60 @@ func TestReadTurnDistinguishesAStartedTurnFromASilentServer(t *testing.T) {
 		})
 	}
 }
+
+func TestRequestNamingAnotherTurnIsDeclinedWithoutAskingTheAsker(t *testing.T) {
+	lines := `{"method":"turn/started","params":{"threadId":"t1","turn":{"id":"turn-2"}}}
+{"id":9,"method":"item/commandExecution/requestApproval","params":{"threadId":"t1","turnId":"turn-1","itemId":"item-1","command":"ls"}}
+{"method":"turn/completed","params":{"threadId":"t1","turn":{"id":"turn-2"}}}
+`
+	var seen []contracts.ApprovalRequest
+	var sent []map[string]any
+	ctx := withAsker(context.Background(), answerWith(contracts.DecisionAllow, &seen))
+	if _, err := readTurn(ctx, bufio.NewReader(strings.NewReader(lines)), turnScope{threadID: "t1"}, nil, nil, collectReplies(&sent)); err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 0 {
+		t.Fatalf("the asker was called %d times for a request of another turn", len(seen))
+	}
+	if got := onlyDecision(t, sent); got != "decline" {
+		t.Fatalf("decision = %q, want decline", got)
+	}
+}
+
+func TestLeftoverRequestOfAPreviousTurnIsDeclinedForTheReadingTurn(t *testing.T) {
+	lines := `{"method":"turn/started","params":{"threadId":"t1","turn":{"id":"turn-2"}}}
+{"id":9,"method":"item/fileChange/requestApproval","params":{"threadId":"t1","turnId":"turn-1","itemId":"item-2","fileChanges":{"a.go":{}}}}
+{"method":"turn/completed","params":{"threadId":"t1","turn":{"id":"turn-2"}}}
+`
+	var seen []contracts.ApprovalRequest
+	var sent []map[string]any
+	ctx := withAsker(context.Background(), answerWith(contracts.DecisionAllow, &seen))
+	if _, err := readTurn(ctx, bufio.NewReader(strings.NewReader(lines)), turnScope{threadID: "t1"}, nil, nil, collectReplies(&sent)); err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 0 {
+		t.Fatalf("the asker approved a previous turn's request %d times", len(seen))
+	}
+	if got := onlyDecision(t, sent); got != "decline" {
+		t.Fatalf("decision = %q, want decline", got)
+	}
+}
+
+func TestRequestWithoutTurnIdIsServedByTheReadingTurn(t *testing.T) {
+	lines := `{"method":"turn/started","params":{"threadId":"t1","turn":{"id":"turn-1"}}}
+{"id":9,"method":"item/commandExecution/requestApproval","params":{"threadId":"t1","itemId":"item-1","command":"ls"}}
+{"method":"turn/completed","params":{"threadId":"t1","turn":{"id":"turn-1"}}}
+`
+	var seen []contracts.ApprovalRequest
+	var sent []map[string]any
+	ctx := withAsker(context.Background(), answerWith(contracts.DecisionAllow, &seen))
+	if _, err := readTurn(ctx, bufio.NewReader(strings.NewReader(lines)), turnScope{threadID: "t1"}, nil, nil, collectReplies(&sent)); err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 1 {
+		t.Fatalf("the reading turn's asker was called %d times, want 1", len(seen))
+	}
+	if got := onlyDecision(t, sent); got != "accept" {
+		t.Fatalf("decision = %q, want accept", got)
+	}
+}

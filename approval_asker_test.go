@@ -222,7 +222,7 @@ func captureStderr(t *testing.T, run func()) string {
 }
 
 func TestUnrecognisedRequestWarnsWhenNoApproverAnswersForAnAsker(t *testing.T) {
-	const method = "item/somethingNew/requestApproval"
+	const method = "item/unboundAsker/requestApproval"
 	ctx := withAsker(context.Background(), answerWith(contracts.DecisionAllow, nil))
 	var sent []map[string]any
 	warnings := captureStderr(t, func() {
@@ -303,7 +303,7 @@ func TestRequestFromAnotherThreadIsDeclinedWithoutAskingTheAsker(t *testing.T) {
 	}
 }
 
-func TestRequestLeftBetweenTurnsIsAnsweredByTheReadingTurn(t *testing.T) {
+func TestRequestOfATurnNotYetKnownIsDeclinedWithoutAskingTheAsker(t *testing.T) {
 	lines := `{"id":9,"method":"item/commandExecution/requestApproval","params":{"threadId":"t1","turnId":"turn-1","itemId":"item-1","command":"ls"}}
 {"method":"turn/started","params":{"threadId":"t1","turn":{"id":"turn-1"}}}
 {"method":"turn/completed","params":{"threadId":"t1","turn":{"id":"turn-1"}}}
@@ -314,11 +314,11 @@ func TestRequestLeftBetweenTurnsIsAnsweredByTheReadingTurn(t *testing.T) {
 	if _, err := readTurn(ctx, bufio.NewReader(strings.NewReader(lines)), turnScope{threadID: "t1"}, nil, nil, collectReplies(&sent)); err != nil {
 		t.Fatal(err)
 	}
-	if len(seen) != 1 {
-		t.Fatalf("the reading turn's asker was called %d times, want 1", len(seen))
+	if len(seen) != 0 {
+		t.Fatalf("the asker was called %d times for a request whose turn was not yet known", len(seen))
 	}
-	if got := onlyDecision(t, sent); got != "accept" {
-		t.Fatalf("decision = %q, want accept", got)
+	if got := onlyDecision(t, sent); got != "decline" {
+		t.Fatalf("decision = %q, want decline", got)
 	}
 }
 

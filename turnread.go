@@ -31,6 +31,7 @@ type turnCollector struct {
 }
 
 func readTurn(ctx context.Context, reader *bufio.Reader, scope turnScope, onEvent func(contracts.BackendEvent), approvals *approver, respondHoldingSendLock func(map[string]any) error) (turnResult, error) {
+	approvals = approvalsForTurn(ctx, approvals)
 	collector := &turnCollector{scope: scope, onEvent: onEvent}
 	for {
 		line, err := reader.ReadBytes('\n')
@@ -75,11 +76,17 @@ func (c *turnCollector) consumeLine(ctx context.Context, line []byte, approvals 
 }
 
 func (c *turnCollector) answerRequest(ctx context.Context, msg map[string]any, approvals *approver, respondHoldingSendLock func(map[string]any) error) error {
+	params := mapField(msg, fieldParams)
+	method := stringField(msg, fieldMethod)
 	if c.scope.threadID != "" {
-		if threadID := stringField(mapField(msg, fieldParams), fieldThreadID); threadID != c.scope.threadID {
-			slog.Error("approval declined: the request names another thread", "method", stringField(msg, fieldMethod), "expected", c.scope.threadID, "got", threadID)
+		if threadID := stringField(params, fieldThreadID); threadID != c.scope.threadID {
+			slog.Error("approval declined: the request names another thread", "method", method, "expected", c.scope.threadID, "got", threadID)
 			return respondHoldingSendLock(approvalResponse(msg[fieldID], false))
 		}
+	}
+	if turn := turnIDOf(params); turn != "" && turn != c.turnID {
+		slog.Error("approval declined: the request names another turn", "method", method, "expected", c.turnID, "got", turn)
+		return respondHoldingSendLock(approvalResponse(msg[fieldID], false))
 	}
 	return answerApproval(ctx, msg, msg[fieldID], approvals, respondHoldingSendLock)
 }
