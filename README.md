@@ -114,8 +114,8 @@ bound is declined at once. A turn that ends with requests still parked declines 
 all. An approval request with no `turnId`, or with an empty one, is refused whatever
 the session: the asker is not called, and the refusal is logged with a warning.
 Warnings are deduplicated per session when the session has an approver, and per turn
-otherwise. Other server requests without a turn id keep the handling they had before
-this change: they are not refused for lacking a turn id.
+otherwise. Other server requests without a turn id keep the handling they have on
+master: they are not refused for lacking a turn id.
 
 Unrecognised approval requests are declined and logged with a warning
 (`unrecognised approval request`), deduplicated in the same way. They are accepted

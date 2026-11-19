@@ -179,7 +179,11 @@ func TestServerRequestWithoutTurnIdThatIsNotAnApprovalKeepsItsHandling(t *testin
 		var seen []contracts.ApprovalRequest
 		var sent []map[string]any
 		ctx := withAsker(context.Background(), answerWith(contracts.DecisionAllow, &seen))
-		if _, err := readTurn(ctx, bufio.NewReader(strings.NewReader(lines)), turnScope{threadID: "t1"}, nil, nil, collectReplies(&sent)); err != nil {
+		var err error
+		warnings := captureStderr(t, func() {
+			_, err = readTurn(ctx, bufio.NewReader(strings.NewReader(lines)), turnScope{threadID: "t1"}, nil, nil, collectReplies(&sent))
+		})
+		if err != nil {
 			t.Fatal(err)
 		}
 		if len(seen) != 0 {
@@ -187,6 +191,9 @@ func TestServerRequestWithoutTurnIdThatIsNotAnApprovalKeepsItsHandling(t *testin
 		}
 		if got := onlyDecision(t, sent); got != "decline" {
 			t.Fatalf("decision = %q, want decline", got)
+		}
+		if warnings != "" {
+			t.Fatalf("a request that is not an approval was warned about: %q", warnings)
 		}
 	})
 }
