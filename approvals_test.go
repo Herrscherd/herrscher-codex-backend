@@ -221,7 +221,7 @@ func TestDeclaresPerToolGating(t *testing.T) {
 }
 
 func TestReadTurnAnswersAnApprovalRequestMidTurn(t *testing.T) {
-	lines := `{"id":9,"method":"item/commandExecution/requestApproval","params":{"command":"rm -rf /"}}
+	lines := `{"id":9,"method":"item/commandExecution/requestApproval","params":{"turnId":"turn-1","command":"rm -rf /"}}
 {"method":"turn/started","params":{"threadId":"t1","turn":{"id":"turn-1"}}}
 {"method":"turn/completed","params":{"threadId":"t1","turn":{"id":"turn-1"}}}
 `

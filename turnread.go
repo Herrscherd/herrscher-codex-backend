@@ -103,6 +103,10 @@ func (c *turnCollector) answerRequest(ctx context.Context, msg map[string]any, a
 		}
 	}
 	turn := turnIDOf(params)
+	if turn == "" && approvals != nil {
+		approvals.warnDeclinedApproval(method)
+		return respondHoldingSendLock(approvalResponse(msg[fieldID], false))
+	}
 	if turn != "" && c.turnID == "" {
 		return c.parkRequest(msg, method, respondHoldingSendLock)
 	}

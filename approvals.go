@@ -218,7 +218,7 @@ func (a *approver) unrecognisedAllowed(ctx context.Context, method string) bool 
 	if a == nil {
 		return true
 	}
-	a.warnUnrecognisedApproval(method)
+	a.warnDeclinedApproval(method)
 	return false
 }
 
@@ -226,7 +226,7 @@ func looksLikeApprovalRequest(method string) bool {
 	return strings.HasSuffix(method, "requestApproval") || strings.HasSuffix(method, "Approval")
 }
 
-func (a *approver) warnUnrecognisedApproval(method string) {
+func (a *approver) warnDeclinedApproval(method string) {
 	if a == nil || !looksLikeApprovalRequest(method) {
 		return
 	}
@@ -243,7 +243,7 @@ func (a *approver) warnUnrecognisedApproval(method string) {
 	if writer == nil {
 		writer = os.Stderr
 	}
-	writeWarning(writer, fmt.Sprintf("herrscher: unrecognised approval request %q declined in session %q\n", method, a.session))
+	writeWarning(writer, fmt.Sprintf("herrscher: approval request %q declined in session %q\n", method, a.session))
 }
 
 func approverFromEnv() *approver { return newApprover(os.Getenv) }

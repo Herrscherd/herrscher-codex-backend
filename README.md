@@ -110,8 +110,8 @@ the reading turn has learned its own id (from the response to `turn/start`, from
 is learned, a parked request naming that turn is served by the asker in arrival
 order, and a parked request naming another turn is declined. A request beyond the
 bound is declined at once. A turn that ends with requests still parked declines them
-all. A request with no `turnId` is served by the turn that reads it, with that
-turn's asker.
+all. A request with no `turnId` is refused: the asker is not called, and the
+refusal is logged with a warning, once per method.
 
 Unrecognised approval requests are declined with a single warning per method when
 an approver or a turn's asker is present. When the session has no approver, the
