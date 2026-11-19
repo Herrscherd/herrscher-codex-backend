@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -222,7 +223,7 @@ func captureStderr(t *testing.T, run func()) string {
 }
 
 func TestUnrecognisedRequestWarnsWhenNoApproverAnswersForAnAsker(t *testing.T) {
-	const method = "item/unboundAsker/requestApproval"
+	const method = "item/somethingNew/requestApproval"
 	ctx := withAsker(context.Background(), answerWith(contracts.DecisionAllow, nil))
 	var sent []map[string]any
 	warnings := captureStderr(t, func() {
@@ -303,8 +304,28 @@ func TestRequestFromAnotherThreadIsDeclinedWithoutAskingTheAsker(t *testing.T) {
 	}
 }
 
-func TestRequestOfATurnNotYetKnownIsDeclinedWithoutAskingTheAsker(t *testing.T) {
+func TestRequestSentBeforeTheTurnIdIsKnownIsServedOnceLearned(t *testing.T) {
 	lines := `{"id":9,"method":"item/commandExecution/requestApproval","params":{"threadId":"t1","turnId":"turn-1","itemId":"item-1","command":"ls"}}
+{"id":7,"result":{"turn":{"id":"turn-1"}}}
+{"method":"turn/started","params":{"threadId":"t1","turn":{"id":"turn-1"}}}
+{"method":"turn/completed","params":{"threadId":"t1","turn":{"id":"turn-1"}}}
+`
+	var seen []contracts.ApprovalRequest
+	var sent []map[string]any
+	ctx := withAsker(context.Background(), answerWith(contracts.DecisionAllow, &seen))
+	if _, err := readTurn(ctx, bufio.NewReader(strings.NewReader(lines)), turnScope{threadID: "t1", requestID: 7}, nil, nil, collectReplies(&sent)); err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 1 {
+		t.Fatalf("the asker was called %d times, want 1 once the turn id was learned", len(seen))
+	}
+	if got := onlyDecision(t, sent); got != "accept" {
+		t.Fatalf("decision = %q, want accept", got)
+	}
+}
+
+func TestParkedRequestOfAnotherTurnIsDeclinedWithoutAskingTheAsker(t *testing.T) {
+	lines := `{"id":9,"method":"item/commandExecution/requestApproval","params":{"threadId":"t1","turnId":"turn-2","itemId":"item-1","command":"ls"}}
 {"method":"turn/started","params":{"threadId":"t1","turn":{"id":"turn-1"}}}
 {"method":"turn/completed","params":{"threadId":"t1","turn":{"id":"turn-1"}}}
 `
@@ -315,7 +336,51 @@ func TestRequestOfATurnNotYetKnownIsDeclinedWithoutAskingTheAsker(t *testing.T) 
 		t.Fatal(err)
 	}
 	if len(seen) != 0 {
-		t.Fatalf("the asker was called %d times for a request whose turn was not yet known", len(seen))
+		t.Fatalf("the asker was called %d times for a request of another turn", len(seen))
+	}
+	if got := onlyDecision(t, sent); got != "decline" {
+		t.Fatalf("decision = %q, want decline", got)
+	}
+}
+
+func TestRequestsBeyondTheParkingBoundAreDeclinedWithoutAskingTheAsker(t *testing.T) {
+	var lines []string
+	for id := 1; id <= maxParkedRequests+1; id++ {
+		lines = append(lines, fmt.Sprintf(`{"id":%d,"method":"item/commandExecution/requestApproval","params":{"threadId":"t1","turnId":"turn-1","itemId":"item-%d","command":"ls"}}`, id, id))
+	}
+	lines = append(lines,
+		`{"method":"turn/started","params":{"threadId":"t1","turn":{"id":"turn-1"}}}`,
+		`{"method":"turn/completed","params":{"threadId":"t1","turn":{"id":"turn-1"}}}`,
+	)
+	var seen []contracts.ApprovalRequest
+	var sent []map[string]any
+	ctx := withAsker(context.Background(), answerWith(contracts.DecisionAllow, &seen))
+	if _, err := readTurn(ctx, bufio.NewReader(strings.NewReader(strings.Join(lines, "\n")+"\n")), turnScope{threadID: "t1"}, nil, nil, collectReplies(&sent)); err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != maxParkedRequests {
+		t.Fatalf("the asker was called %d times, want the %d parked requests", len(seen), maxParkedRequests)
+	}
+	if len(sent) != maxParkedRequests+1 {
+		t.Fatalf("sent %d replies, want one per request (%d)", len(sent), maxParkedRequests+1)
+	}
+	if got := mapField(sent[0], fieldResult)["decision"]; got != "decline" {
+		t.Fatalf("the request beyond the bound got %v first, want decline before the parked ones are served", got)
+	}
+}
+
+func TestTurnEndingWithoutItsIdDeclinesItsParkedRequests(t *testing.T) {
+	lines := `{"id":9,"method":"item/commandExecution/requestApproval","params":{"threadId":"t1","turnId":"turn-1","itemId":"item-1","command":"ls"}}
+{"method":"turn/completed","params":{"threadId":"t1","turn":{"id":"turn-1"}}}
+`
+	var seen []contracts.ApprovalRequest
+	var sent []map[string]any
+	ctx := withAsker(context.Background(), answerWith(contracts.DecisionAllow, &seen))
+	if _, err := readTurn(ctx, bufio.NewReader(strings.NewReader(lines)), turnScope{threadID: "t1"}, nil, nil, collectReplies(&sent)); err == nil {
+		t.Fatal("a turn that ends without its id should report the read failure")
+	}
+	if len(seen) != 0 {
+		t.Fatalf("the asker was called %d times for a turn that never announced its id", len(seen))
 	}
 	if got := onlyDecision(t, sent); got != "decline" {
 		t.Fatalf("decision = %q, want decline", got)

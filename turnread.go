@@ -18,31 +18,43 @@ type turnScope struct {
 	compaction bool
 }
 
-const maxParkedCompletions = 16
+const (
+	maxParkedCompletions = 16
+	maxParkedRequests    = 16
+)
 
 type turnCollector struct {
-	scope    turnScope
-	onEvent  func(contracts.BackendEvent)
-	turnID   string
-	parked   []map[string]any
-	result   turnResult
-	deltas   strings.Builder
-	observed bool
+	scope          turnScope
+	onEvent        func(contracts.BackendEvent)
+	turnID         string
+	parked         []map[string]any
+	parkedRequests []map[string]any
+	result         turnResult
+	deltas         strings.Builder
+	observed       bool
 }
 
 func readTurn(ctx context.Context, reader *bufio.Reader, scope turnScope, onEvent func(contracts.BackendEvent), approvals *approver, respondHoldingSendLock func(map[string]any) error) (turnResult, error) {
 	approvals = approvalsForTurn(ctx, approvals)
 	collector := &turnCollector{scope: scope, onEvent: onEvent}
+	result, err := collector.read(ctx, reader, approvals, respondHoldingSendLock)
+	if declined := collector.declineParkedRequests(respondHoldingSendLock); declined != nil {
+		err = errors.Join(err, declined)
+	}
+	return result, err
+}
+
+func (c *turnCollector) read(ctx context.Context, reader *bufio.Reader, approvals *approver, respondHoldingSendLock func(map[string]any) error) (turnResult, error) {
 	for {
 		line, err := reader.ReadBytes('\n')
 		if len(line) > 0 {
-			result, done, handleErr := collector.consumeLine(ctx, line, approvals, respondHoldingSendLock)
+			result, done, handleErr := c.consumeLine(ctx, line, approvals, respondHoldingSendLock)
 			if done || handleErr != nil {
 				return result, handleErr
 			}
 		}
 		if err != nil {
-			return collector.readFailure(err)
+			return c.readFailure(err)
 		}
 	}
 }
@@ -60,6 +72,9 @@ func (c *turnCollector) consumeLine(ctx context.Context, line []byte, approvals 
 	if err := c.adoptTurnResponse(msg); err != nil {
 		return turnResult{}, true, err
 	}
+	if err := c.serveParkedRequests(ctx, approvals, respondHoldingSendLock); err != nil {
+		return turnResult{}, true, err
+	}
 	if c.result.completed {
 		return c.outcome(), true, nil
 	}
@@ -67,6 +82,9 @@ func (c *turnCollector) consumeLine(ctx context.Context, line []byte, approvals 
 		return turnResult{}, false, c.answerRequest(ctx, msg, approvals, respondHoldingSendLock)
 	}
 	if err := c.handleNotification(msg); err != nil {
+		return turnResult{}, true, err
+	}
+	if err := c.serveParkedRequests(ctx, approvals, respondHoldingSendLock); err != nil {
 		return turnResult{}, true, err
 	}
 	if c.result.completed {
@@ -84,11 +102,48 @@ func (c *turnCollector) answerRequest(ctx context.Context, msg map[string]any, a
 			return respondHoldingSendLock(approvalResponse(msg[fieldID], false))
 		}
 	}
-	if turn := turnIDOf(params); turn != "" && turn != c.turnID {
+	turn := turnIDOf(params)
+	if turn != "" && c.turnID == "" {
+		return c.parkRequest(msg, method, respondHoldingSendLock)
+	}
+	if turn != "" && turn != c.turnID {
 		slog.Error("approval declined: the request names another turn", "method", method, "expected", c.turnID, "got", turn)
 		return respondHoldingSendLock(approvalResponse(msg[fieldID], false))
 	}
 	return answerApproval(ctx, msg, msg[fieldID], approvals, respondHoldingSendLock)
+}
+
+func (c *turnCollector) parkRequest(msg map[string]any, method string, respondHoldingSendLock func(map[string]any) error) error {
+	if len(c.parkedRequests) == maxParkedRequests {
+		slog.Error("approval declined: too many requests arrived before the turn id was known", "method", method, "limit", maxParkedRequests)
+		return respondHoldingSendLock(approvalResponse(msg[fieldID], false))
+	}
+	c.parkedRequests = append(c.parkedRequests, msg)
+	return nil
+}
+
+func (c *turnCollector) serveParkedRequests(ctx context.Context, approvals *approver, respondHoldingSendLock func(map[string]any) error) error {
+	if c.turnID == "" {
+		return nil
+	}
+	for len(c.parkedRequests) > 0 {
+		msg := c.parkedRequests[0]
+		c.parkedRequests = c.parkedRequests[1:]
+		if err := c.answerRequest(ctx, msg, approvals, respondHoldingSendLock); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *turnCollector) declineParkedRequests(respondHoldingSendLock func(map[string]any) error) error {
+	var errs []error
+	for _, msg := range c.parkedRequests {
+		slog.Error("approval declined: the turn ended with the request unanswered", "method", stringField(msg, fieldMethod))
+		errs = append(errs, respondHoldingSendLock(approvalResponse(msg[fieldID], false)))
+	}
+	c.parkedRequests = nil
+	return errors.Join(errs...)
 }
 
 func isServerRequest(msg map[string]any) bool {
