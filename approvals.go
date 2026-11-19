@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -20,7 +21,7 @@ type approver struct {
 	session, bin string
 	warn         io.Writer
 	warnMu       sync.Mutex
-	warned       map[string]bool
+	warned       map[declineWarning]bool
 	ask          func(ctx context.Context, bin string, argv []string) ([]byte, error)
 }
 
@@ -37,9 +38,19 @@ func runApprove(ctx context.Context, bin string, argv []string) ([]byte, error) 
 }
 
 var (
-	errVerdictUnreadable = errors.New("the approver answer is not a verdict")
-	errVerdictMissing    = errors.New("the approver answer names no decision")
+	errVerdictUnreadable   = errors.New("the approver answer is not a verdict")
+	errVerdictMissing      = errors.New("the approver answer names no decision")
+	errNoApprovalChannel   = errors.New("the session has no approver and the turn carries no daemon asker")
+	errAnswerUnreadable    = errors.New("the daemon answer names no decision")
+	errAnswerMismatch      = errors.New("the daemon answered another approval request")
+	errUngatedSession      = errors.New("codex session was started without approvals, so a turn that asks for approval cannot be gated")
+	errApprovalIDUnusable  = errors.New("the approval request carries no usable id")
+	errApprovalChannelLost = errors.New("codex session was put on approval by a turn's asker, and this turn carries no asker or approver")
 )
+
+func (a *approver) hasChannel() bool {
+	return a != nil && a.ask != nil
+}
 
 func (a *approver) allow(ctx context.Context, tool, subject string) bool {
 	if a == nil {
@@ -54,6 +65,9 @@ func (a *approver) allow(ctx context.Context, tool, subject string) bool {
 }
 
 func (a *approver) decide(ctx context.Context, tool, subject string) (string, error) {
+	if a.ask == nil {
+		return "", errNoApprovalChannel
+	}
 	out, err := a.ask(ctx, a.bin, []string{
 		"approve", "ask",
 		"--session", a.session,
@@ -73,6 +87,40 @@ func (a *approver) decide(ctx context.Context, tool, subject string) (string, er
 		return "", errVerdictMissing
 	}
 	return verdict.Decision, nil
+}
+
+func (a *approver) verdict(ctx context.Context, requestID string, request approvalRequest) bool {
+	asker, asked := contracts.ApprovalAskerFrom(ctx)
+	if !asked {
+		return a.allow(ctx, request.tool, request.subject)
+	}
+	return askDaemon(ctx, asker, requestID, request)
+}
+
+func askDaemon(ctx context.Context, asker contracts.ApprovalAsker, requestID string, request approvalRequest) bool {
+	answer, err := requestFromDaemon(ctx, asker, requestID, request)
+	if err != nil {
+		slog.Error("approval declined: the daemon did not answer", "tool", request.tool, "error", err)
+		return false
+	}
+	return answer.Allowed()
+}
+
+func requestFromDaemon(ctx context.Context, asker contracts.ApprovalAsker, requestID string, request approvalRequest) (contracts.ApprovalAnswer, error) {
+	if err := ctx.Err(); err != nil {
+		return contracts.ApprovalAnswer{}, err
+	}
+	answer := asker(ctx, contracts.ApprovalRequest{ID: requestID, Tool: request.tool, Subject: request.subject})
+	if err := ctx.Err(); err != nil {
+		return contracts.ApprovalAnswer{}, err
+	}
+	if answer.ID != requestID {
+		return contracts.ApprovalAnswer{}, errAnswerMismatch
+	}
+	if _, err := contracts.ParseApprovalDecision(string(answer.Decision)); err != nil {
+		return contracts.ApprovalAnswer{}, fmt.Errorf("%w: %w", errAnswerUnreadable, err)
+	}
+	return answer, nil
 }
 
 type approvalRequest struct {
@@ -95,6 +143,34 @@ func approvalSubject(method string, params map[string]any) (approvalRequest, boo
 	return approvalRequest{}, false
 }
 
+func approvalID(method string, requestID any, params map[string]any) (string, error) {
+	key, ok := requestKey(requestID)
+	if !ok {
+		return "", errApprovalIDUnusable
+	}
+	return strings.Join(nonEmpty(method, key, stringField(params, fieldThreadID), turnIDOf(params), stringField(params, fieldItemID)), "/"), nil
+}
+
+func requestKey(requestID any) (string, bool) {
+	switch number := requestID.(type) {
+	case float64:
+		return strconv.FormatFloat(number, 'f', -1, 64), true
+	case string:
+		return number, number != ""
+	}
+	return "", false
+}
+
+func nonEmpty(values ...string) []string {
+	kept := make([]string, 0, len(values))
+	for _, value := range values {
+		if value != "" {
+			kept = append(kept, value)
+		}
+	}
+	return kept
+}
+
 func approvalResponse(requestID any, allow bool) map[string]any {
 	decision := "decline"
 	if allow {
@@ -110,21 +186,39 @@ func approvalPolicy(gated bool) string {
 	return "never"
 }
 
+func approvalsForTurn(turnCtx context.Context, approvals *approver) *approver {
+	if approvals != nil {
+		return approvals
+	}
+	if _, asked := contracts.ApprovalAskerFrom(turnCtx); asked {
+		return &approver{warn: os.Stderr}
+	}
+	return nil
+}
+
 func answerApproval(ctx context.Context, msg map[string]any, requestID any, approvals *approver, respondHoldingSendLock func(map[string]any) error) error {
 	method := stringField(msg, fieldMethod)
 	params := mapField(msg, fieldParams)
 	request, known := approvalSubject(method, params)
 	if !known {
-		return respondHoldingSendLock(approvalResponse(requestID, approvals.unrecognisedAllowed(method)))
+		return respondHoldingSendLock(approvalResponse(requestID, approvals.unrecognisedAllowed(ctx, method)))
 	}
-	return respondHoldingSendLock(approvalResponse(requestID, approvals.allow(ctx, request.tool, request.subject)))
+	approvalKey, err := approvalID(method, requestID, params)
+	if err != nil {
+		slog.Error("approval declined: the request carries no usable id", "method", method, "error", err)
+		return respondHoldingSendLock(approvalResponse(requestID, false))
+	}
+	return respondHoldingSendLock(approvalResponse(requestID, approvals.verdict(ctx, approvalKey, request)))
 }
 
-func (a *approver) unrecognisedAllowed(method string) bool {
+func (a *approver) unrecognisedAllowed(ctx context.Context, method string) bool {
+	if a == nil {
+		a = approvalsForTurn(ctx, nil)
+	}
 	if a == nil {
 		return true
 	}
-	a.warnUnrecognisedApproval(method)
+	a.warnDeclined(causeUnrecognised, method)
 	return false
 }
 
@@ -132,20 +226,51 @@ func looksLikeApprovalRequest(method string) bool {
 	return strings.HasSuffix(method, "requestApproval") || strings.HasSuffix(method, "Approval")
 }
 
-func (a *approver) warnUnrecognisedApproval(method string) {
-	if a == nil || a.warn == nil || !looksLikeApprovalRequest(method) {
+type declineCause int
+
+const (
+	causeUnrecognised declineCause = iota + 1
+	causeNoTurnID
+)
+
+type declineWarning struct {
+	cause  declineCause
+	method string
+}
+
+func (c declineCause) message(method, session string) string {
+	if c == causeNoTurnID {
+		return fmt.Sprintf("herrscher: approval request %q declined: it carries no turn id\n", method)
+	}
+	return fmt.Sprintf("herrscher: unrecognised approval request %q declined in session %q\n", method, session)
+}
+
+func (a *approver) warnDeclined(cause declineCause, method string) {
+	if a == nil || !looksLikeApprovalRequest(method) {
 		return
 	}
 	a.warnMu.Lock()
 	defer a.warnMu.Unlock()
-	if a.warned[method] {
+	key := declineWarning{cause: cause, method: method}
+	if a.warned[key] {
 		return
 	}
 	if a.warned == nil {
-		a.warned = make(map[string]bool)
+		a.warned = make(map[declineWarning]bool)
 	}
-	a.warned[method] = true
-	writeWarning(a.warn, fmt.Sprintf("herrscher: unrecognised approval request %q declined in session %q\n", method, a.session))
+	a.warned[key] = true
+	writer := a.warn
+	if writer == nil {
+		writer = os.Stderr
+	}
+	writeWarning(writer, cause.message(method, a.session))
+}
+
+func warnerFor(approvals *approver) *approver {
+	if approvals != nil {
+		return approvals
+	}
+	return &approver{warn: os.Stderr}
 }
 
 func approverFromEnv() *approver { return newApprover(os.Getenv) }

@@ -1,0 +1,190 @@
+package codex
+
+import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	contracts "github.com/Herrscherd/herrscher-contracts"
+)
+
+const turnAppServerScript = `read -r _; printf '{"id":1,"result":{}}\n'; read -r _; read -r threadReq; printf '%s\n' "$threadReq" > "$RECORD.thread"; printf '%s\n' "$@" > "$RECORD"; printf '{"id":2,"result":{"thread":{"id":"thread-1"}}}\n'; read -r _; printf '{"id":3,"result":{"turn":{"id":"turn-1"}}}\n'; printf '{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed"}}}\n'; cat >/dev/null`
+
+func turnResponder(t *testing.T, record, resume string) *streamResponder {
+	t.Helper()
+	r := &streamResponder{base: []string{"sh", "-c", turnAppServerScript}, dir: t.TempDir(), env: map[string]string{"RECORD": record}, resumeID: resume}
+	r.start = r.launchedWithin(context.Background())
+	t.Cleanup(func() { closeLogged(t, r.Close) })
+	return r
+}
+
+func recordOf(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
+func TestAskerTurnRelaunchesAnUngatedSessionWithItsThreadOnRequest(t *testing.T) {
+	record := filepath.Join(t.TempDir(), "argv")
+	r := turnResponder(t, record, "")
+	if _, err := r.Respond(context.Background(), contracts.Prompt{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(recordOf(t, record), `approval_policy="never"`) {
+		t.Fatal("the first turn did not start the session on never")
+	}
+	ctx := withAsker(context.Background(), answerWith(contracts.DecisionAllow, nil))
+	if _, err := r.Respond(ctx, contracts.Prompt{}, nil); err != nil {
+		t.Fatalf("the asker turn was refused instead of relaunching the session: %v", err)
+	}
+	if !strings.Contains(recordOf(t, record), `approval_policy="on-request"`) {
+		t.Fatal("the relaunched session did not start on-request")
+	}
+	if thread := recordOf(t, record+".thread"); !strings.Contains(thread, "thread/resume") || !strings.Contains(thread, "thread-1") {
+		t.Fatalf("the relaunch did not resume thread-1: %q", thread)
+	}
+	if r.sess.approvalsIfGated == nil {
+		t.Fatal("the relaunched session keeps no approver")
+	}
+}
+
+func TestAskerTurnWithoutAThreadIsRefusedWithoutRelaunch(t *testing.T) {
+	r := &streamResponder{
+		sess: newAppSession(brokenWriteCloser{err: errNoWrite}, strings.NewReader("")),
+		start: func(context.Context, string) (*appSession, error) {
+			t.Error("a session without a thread was relaunched")
+			return nil, errNoRestart
+		},
+	}
+	ctx := withAsker(context.Background(), answerWith(contracts.DecisionAllow, nil))
+	if _, err := r.Respond(ctx, contracts.Prompt{}, nil); !errors.Is(err, errUngatedSession) {
+		t.Fatalf("err = %v, want errUngatedSession", err)
+	}
+}
+
+func TestSessionLaunchedByAnAskerRefusesALaterTurnWithoutAsker(t *testing.T) {
+	record := filepath.Join(t.TempDir(), "argv")
+	r := turnResponder(t, record, "")
+	if _, err := r.Respond(withAsker(context.Background(), answerWith(contracts.DecisionAllow, nil)), contracts.Prompt{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Respond(context.Background(), contracts.Prompt{}, nil); !errors.Is(err, errApprovalChannelLost) {
+		t.Fatalf("err = %v, want errApprovalChannelLost", err)
+	}
+}
+
+func TestCompactFollowsTheSameTurnRulesAsRespond(t *testing.T) {
+	asker := withAsker(context.Background(), answerWith(contracts.DecisionAllow, nil))
+	asked := contracts.CompactRequest{}
+	cases := map[string]struct {
+		responder *streamResponder
+		asked     bool
+		want      error
+	}{
+		"an asker on an ungated session without a thread": {
+			responder: &streamResponder{sess: newAppSession(brokenWriteCloser{err: errNoWrite}, strings.NewReader(""))},
+			asked:     true,
+			want:      errUngatedSession,
+		},
+	}
+	plain := context.Background()
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			ctx := plain
+			if tc.asked {
+				ctx = asker
+			}
+			_, err := tc.responder.Compact(ctx, asked, nil)
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("err = %v, want %v", err, tc.want)
+			}
+		})
+	}
+}
+
+const compactAppServerScript = `printf '%s\n' "$@" > "$RECORD"; read -r _; printf '{"id":1,"result":{}}\n'; read -r _; read -r _; printf '{"id":2,"result":{"thread":{"id":"thread-1"}}}\n'; read -r _; printf '{"id":3,"result":{"turn":{"id":"turn-1"}}}\n'; printf '{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed"}}}\n'; read -r _; printf '{"method":"item/started","params":{"threadId":"thread-1","turnId":"turn-2","item":{"type":"contextCompaction","id":"c1"}}}\n'; printf '{"id":77,"method":"item/commandExecution/requestApproval","params":{"threadId":"thread-1","turnId":"turn-2","itemId":"item-1","command":"rm -rf /"}}\n'; read -r reply; printf '%s\n' "$reply" > "$RECORD.reply"; printf '{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-2","status":"completed"}}}\n'; cat >/dev/null`
+
+func TestCompactWithoutAskerOnAGatedSessionSucceedsAndDeclinesItsApprovals(t *testing.T) {
+	dir := t.TempDir()
+	record := filepath.Join(dir, "argv")
+	r := &streamResponder{base: []string{"sh", "-c", compactAppServerScript}, dir: dir, env: map[string]string{"RECORD": record}}
+	r.start = r.launchedWithin(context.Background())
+	t.Cleanup(func() { closeLogged(t, r.Close) })
+	if _, err := r.Respond(withAsker(context.Background(), answerWith(contracts.DecisionAllow, nil)), contracts.Prompt{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(recordOf(t, record), `approval_policy="on-request"`) {
+		t.Fatal("the session was not started on-request by the asker turn")
+	}
+	if _, err := r.Compact(context.Background(), contracts.CompactRequest{}, nil); err != nil {
+		t.Fatalf("a compaction without asker on a gated session was refused: %v", err)
+	}
+	if reply := recordOf(t, record+".reply"); !strings.Contains(reply, `"decline"`) {
+		t.Fatalf("the approval request during the compaction was not declined: %q", reply)
+	}
+	if r.sess.approvalsIfGated == nil {
+		t.Fatal("the compaction dropped the gate of the session")
+	}
+}
+
+func TestFailedRelaunchKeepsTheThreadForTheNextAskerTurn(t *testing.T) {
+	record := filepath.Join(t.TempDir(), "argv")
+	r := turnResponder(t, record, "")
+	if _, err := r.Respond(context.Background(), contracts.Prompt{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	previous := r.sess
+	launch := r.start
+	var resumed string
+	r.start = func(_ context.Context, resume string) (*appSession, error) {
+		resumed = resume
+		return nil, errNoRestart
+	}
+	ctx := withAsker(context.Background(), answerWith(contracts.DecisionAllow, nil))
+	if _, err := r.Respond(ctx, contracts.Prompt{}, nil); !errors.Is(err, errNoRestart) {
+		t.Fatalf("err = %v, want the relaunch failure", err)
+	}
+	if resumed != "thread-1" {
+		t.Fatalf("the relaunch resumed %q, want thread-1", resumed)
+	}
+	if r.sess != nil {
+		t.Fatal("a session is still held after a failed relaunch")
+	}
+	if previous.cmd.ProcessState == nil {
+		t.Fatal("the previous codex process was not closed by the relaunch")
+	}
+	if r.resumeID != "thread-1" {
+		t.Fatalf("resumeID = %q after a failed relaunch, want thread-1", r.resumeID)
+	}
+	r.start = launch
+	if _, err := r.Respond(ctx, contracts.Prompt{}, nil); err != nil {
+		t.Fatalf("the next asker turn did not relaunch: %v", err)
+	}
+	if !strings.Contains(recordOf(t, record), `approval_policy="on-request"`) {
+		t.Fatal("the next asker turn did not start on-request")
+	}
+	if thread := recordOf(t, record+".thread"); !strings.Contains(thread, "thread/resume") || !strings.Contains(thread, "thread-1") {
+		t.Fatalf("the next asker turn did not resume thread-1: %q", thread)
+	}
+}
+
+func TestReconstructedResponderWithAnAskerTurnResumesOnRequest(t *testing.T) {
+	record := filepath.Join(t.TempDir(), "argv")
+	r := turnResponder(t, record, "thread-1")
+	ctx := withAsker(context.Background(), answerWith(contracts.DecisionAllow, nil))
+	if _, err := r.Respond(ctx, contracts.Prompt{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(recordOf(t, record), `approval_policy="on-request"`) {
+		t.Fatal("the reconstructed session did not start on-request")
+	}
+	if thread := recordOf(t, record+".thread"); !strings.Contains(thread, "thread/resume") {
+		t.Fatalf("the reconstructed session did not resume its thread: %q", thread)
+	}
+}

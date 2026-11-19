@@ -6,6 +6,7 @@ const (
 	fieldText        = "text"
 	fieldThreadID    = "threadId"
 	fieldTurnID      = "turnId"
+	fieldItemID      = "itemId"
 	fieldTurn        = "turn"
 	fieldThread      = "thread"
 	fieldItem        = "item"

@@ -163,7 +163,7 @@ func TestAnswerApprovalAlwaysReplies(t *testing.T) {
 	a := &approver{session: "api", ask: func(context.Context, string, []string) ([]byte, error) {
 		return []byte(`{"decision":"deny"}`), nil
 	}}
-	if err := answerApproval(context.Background(), map[string]any{"method": "item/somethingNew/requestApproval"}, 1, a, respond); err != nil {
+	if err := answerApproval(context.Background(), map[string]any{"method": "item/somethingNew/requestApproval"}, float64(1), a, respond); err != nil {
 		t.Fatal(err)
 	}
 	if err := answerApproval(context.Background(), map[string]any{
@@ -221,7 +221,7 @@ func TestDeclaresPerToolGating(t *testing.T) {
 }
 
 func TestReadTurnAnswersAnApprovalRequestMidTurn(t *testing.T) {
-	lines := `{"id":9,"method":"item/commandExecution/requestApproval","params":{"command":"rm -rf /"}}
+	lines := `{"id":9,"method":"item/commandExecution/requestApproval","params":{"turnId":"turn-1","command":"rm -rf /"}}
 {"method":"turn/started","params":{"threadId":"t1","turn":{"id":"turn-1"}}}
 {"method":"turn/completed","params":{"threadId":"t1","turn":{"id":"turn-1"}}}
 `
@@ -249,7 +249,7 @@ func TestUnrecognisedRequestIsDeclinedInAGatedSession(t *testing.T) {
 		var sent []map[string]any
 		a := &approver{session: "api"}
 		respond := func(m map[string]any) error { sent = append(sent, m); return nil }
-		if err := answerApproval(context.Background(), map[string]any{"method": method}, 1, a, respond); err != nil {
+		if err := answerApproval(context.Background(), map[string]any{"method": method}, float64(1), a, respond); err != nil {
 			t.Fatal(err)
 		}
 		if got := mapField(sent[0], "result")["decision"]; got != "decline" {
@@ -261,7 +261,7 @@ func TestUnrecognisedRequestIsDeclinedInAGatedSession(t *testing.T) {
 func TestUnrecognisedRequestIsAcceptedWhenUngated(t *testing.T) {
 	var sent []map[string]any
 	respond := func(m map[string]any) error { sent = append(sent, m); return nil }
-	if err := answerApproval(context.Background(), map[string]any{"method": "item/somethingNew/requestApproval"}, 1, nil, respond); err != nil {
+	if err := answerApproval(context.Background(), map[string]any{"method": "item/somethingNew/requestApproval"}, float64(1), nil, respond); err != nil {
 		t.Fatal(err)
 	}
 	if got := mapField(sent[0], "result")["decision"]; got != "accept" {
@@ -284,10 +284,10 @@ func TestAnswerApprovalWarnsOnceOnUnrecognisedApprovalRequest(t *testing.T) {
 			var warned strings.Builder
 			a := &approver{session: "api", warn: &warned}
 			respond := func(map[string]any) error { return nil }
-			if err := answerApproval(context.Background(), map[string]any{"method": tc.method}, 1, a, respond); err != nil {
+			if err := answerApproval(context.Background(), map[string]any{"method": tc.method}, float64(1), a, respond); err != nil {
 				t.Fatal(err)
 			}
-			if err := answerApproval(context.Background(), map[string]any{"method": tc.method}, 2, a, respond); err != nil {
+			if err := answerApproval(context.Background(), map[string]any{"method": tc.method}, float64(2), a, respond); err != nil {
 				t.Fatal(err)
 			}
 			got := strings.Contains(warned.String(), tc.method)
@@ -301,13 +301,50 @@ func TestAnswerApprovalWarnsOnceOnUnrecognisedApprovalRequest(t *testing.T) {
 	}
 }
 
+func TestUnrecognisedMethodWarnsOnlyOnceInATurnWithoutAnApprover(t *testing.T) {
+	lines := `{"method":"turn/started","params":{"turn":{"id":"turn-1"}}}
+{"id":1,"method":"item/nilReceiver/requestApproval","params":{"turnId":"turn-1"}}
+{"id":2,"method":"item/nilReceiver/requestApproval","params":{"turnId":"turn-1"}}
+{"id":3,"method":"item/nilReceiver/requestApproval","params":{"turnId":"turn-1"}}
+{"method":"turn/completed","params":{"turn":{"id":"turn-1","status":"completed"}}}
+`
+	ctx := withAsker(context.Background(), answerWith(contracts.DecisionAllow, nil))
+	var sent []map[string]any
+	warnings := captureStderr(t, func() {
+		if _, err := readTurn(ctx, bufio.NewReader(strings.NewReader(lines)), turnScope{}, nil, nil, collectReplies(&sent)); err != nil {
+			t.Error(err)
+		}
+	})
+	if len(sent) != 3 {
+		t.Fatalf("answered %d of 3 requests", len(sent))
+	}
+	if got := strings.Count(warnings, "item/nilReceiver/requestApproval"); got != 1 {
+		t.Fatalf("warned %d times for one method without an approver, want 1: %q", got, warnings)
+	}
+}
+
+func TestUnrecognisedMethodWarnsOnlyOnceForAnApproverWithItsOwnWriter(t *testing.T) {
+	var warned strings.Builder
+	a := &approver{session: "api", warn: &warned}
+	respond := func(map[string]any) error { return nil }
+	for number := range 3 {
+		msg := map[string]any{"method": "item/ownWriter/requestApproval"}
+		if err := answerApproval(withAsker(context.Background(), answerWith(contracts.DecisionAllow, nil)), msg, float64(number+1), a, respond); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := strings.Count(warned.String(), "item/ownWriter/requestApproval"); got != 1 {
+		t.Fatalf("warned %d times for one method, want 1: %q", got, warned.String())
+	}
+}
+
 func TestAnswerApprovalReturnsRespondError(t *testing.T) {
 	sentinel := errors.New("respond failed")
 	a := &approver{session: "api", ask: func(context.Context, string, []string) ([]byte, error) {
 		return []byte(`{"decision":"allow"}`), nil
 	}}
 	respond := func(map[string]any) error { return sentinel }
-	if err := answerApproval(context.Background(), map[string]any{"method": "item/somethingNew/requestApproval"}, 1, a, respond); !errors.Is(err, sentinel) {
+	if err := answerApproval(context.Background(), map[string]any{"method": "item/somethingNew/requestApproval"}, float64(1), a, respond); !errors.Is(err, sentinel) {
 		t.Fatalf("err=%v, want the respond error", err)
 	}
 }
