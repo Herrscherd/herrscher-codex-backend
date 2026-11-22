@@ -319,7 +319,7 @@ func TestSeenCallsAreBoundedPerTurn(t *testing.T) {
 	}
 }
 
-func TestEachBoundWarnsOncePerExecution(t *testing.T) {
+func TestEachBoundWarnsOncePerTurn(t *testing.T) {
 	logs := captureLog(t)
 	messages := []map[string]any{toolTurnStarted()}
 	for index := 1; index <= maxOpenCalls+2; index++ {

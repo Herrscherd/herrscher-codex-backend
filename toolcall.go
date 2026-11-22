@@ -17,10 +17,16 @@ const (
 )
 
 type callTracker struct {
-	open              map[string]struct{}
-	seen              map[string]struct{}
-	openBoundReported bool
-	seenBoundReported bool
+	open      map[string]struct{}
+	seen      map[string]struct{}
+	openBound boundReport
+	seenBound boundReport
+}
+
+type boundReport struct {
+	name     string
+	limit    int
+	reported bool
 }
 
 func (t *callTracker) begin(callID string) bool {
@@ -31,28 +37,30 @@ func (t *callTracker) begin(callID string) bool {
 		return false
 	}
 	if len(t.seen) >= maxSeenCalls {
-		reportBoundOnce(&t.seenBoundReported, "max_seen", maxSeenCalls)
+		t.seenBound.warnOnce()
 		return false
 	}
 	if t.seen == nil {
 		t.open = make(map[string]struct{})
 		t.seen = make(map[string]struct{})
+		t.openBound = boundReport{name: "max_open", limit: maxOpenCalls}
+		t.seenBound = boundReport{name: "max_seen", limit: maxSeenCalls}
 	}
 	t.seen[callID] = struct{}{}
 	if len(t.open) >= maxOpenCalls {
-		reportBoundOnce(&t.openBoundReported, "max_open", maxOpenCalls)
+		t.openBound.warnOnce()
 		return false
 	}
 	t.open[callID] = struct{}{}
 	return true
 }
 
-func reportBoundOnce(reported *bool, bound string, limit int) {
-	if *reported {
+func (b *boundReport) warnOnce() {
+	if b.reported {
 		return
 	}
-	*reported = true
-	slog.Warn("tool calls reach a bound of the execution, later starts carry no lifecycle", "bound", bound, "limit", limit)
+	b.reported = true
+	slog.Warn("tool calls reach a bound of the turn, later starts carry no lifecycle", "bound", b.name, "limit", b.limit)
 }
 
 func (t *callTracker) end(callID string) bool {

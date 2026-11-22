@@ -96,8 +96,8 @@ id finished earlier in the same turn never starts a call again: its repeated
 start is bare, and its finish emits nothing. A start made while 256 calls are
 open is bare too, and its id is seen, so it stays bare for the rest of the turn
 even after a slot frees. Once 4096 ids are seen, every new start is bare. The
-first start refused by each bound in an execution logs one warning, and a reset
-starts a new execution. An id longer than 256 bytes never opens a call: its
+first start refused by each bound in a turn logs one warning, and a turn retried
+after a reset is a new turn. An id longer than 256 bytes never opens a call: its
 start is bare and its finish emits nothing. A finish is emitted only for an open
 id, and it closes that id: it frees one of the 256 slots, but the id stays seen
 for the rest of the turn. A repeated or unknown finish emits nothing. A call
@@ -251,11 +251,14 @@ thread history that the reopened session resumes. The reader cannot remove them,
 so the next turn may read them as context. This limit is not verified against a
 live app-server.
 
-The `oneshot` mode has no session to compact, so its instance does not implement the
-`Compact` port, although the manifest still declares `Capabilities.Compactor`. The host
-therefore attempts a compaction, the instance answers `no_compactor`, and the host
-refuses it: the first refusal logs one warning for the daemon, then each compaction is
-refused without a new warning. `CODEX_COMPACT_TIMEOUT` has no effect in that mode, which includes the Windows fallback (`HERRSCHER_CODEX_ONESHOT_WINDOWS=1`) that serves oneshot even when `CODEX_STREAM=true`.
+The `oneshot` mode has no session to compact, so its instance does not implement
+the `Compact` port, although the manifest still declares
+`Capabilities.Compactor`. The host therefore attempts a compaction, the instance
+answers `no_compactor`, and the host refuses it: the first refusal logs one
+warning for the daemon, then each compaction is refused without a new warning.
+`CODEX_COMPACT_TIMEOUT` has no effect in that mode, which includes the Windows
+fallback (`HERRSCHER_CODEX_ONESHOT_WINDOWS=1`) that serves oneshot even when
+`CODEX_STREAM=true`.
 
 ## Model catalog
 
