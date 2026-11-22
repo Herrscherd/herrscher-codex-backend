@@ -319,6 +319,63 @@ func TestSeenCallsAreBoundedPerTurn(t *testing.T) {
 	}
 }
 
+func TestEachBoundWarnsOncePerExecution(t *testing.T) {
+	logs := captureLog(t)
+	messages := []map[string]any{toolTurnStarted()}
+	for index := 1; index <= maxOpenCalls+2; index++ {
+		messages = append(messages, toolItemNotice(methodItemStart, commandItem(numberedCallID(index), "inProgress", "step", nil)))
+	}
+	for index := 1; index <= maxOpenCalls+2; index++ {
+		messages = append(messages, toolItemNotice(methodItemEnd, commandItem(numberedCallID(index), "completed", "step", 0)))
+	}
+	for index := maxOpenCalls + 3; index <= maxSeenCalls+2; index++ {
+		id := numberedCallID(index)
+		messages = append(messages,
+			toolItemNotice(methodItemStart, commandItem(id, "inProgress", "step", nil)),
+			toolItemNotice(methodItemEnd, commandItem(id, "completed", "step", 0)),
+		)
+	}
+	messages = append(messages, toolTurnCompleted())
+	runToolTurn(t, turnScope{threadID: toolTestThread}, messages...)
+
+	for _, bound := range []string{"bound=max_open", "bound=max_seen"} {
+		if count := strings.Count(logs.String(), bound); count != 1 {
+			t.Fatalf("warnings naming %s = %d, want 1 in\n%s", bound, count, logs.String())
+		}
+	}
+}
+
+func TestCallIDBeyondTheLengthBoundNeverOpensACall(t *testing.T) {
+	longID := strings.Repeat("x", maxCallIDBytes+1)
+	events := runToolTurn(t, turnScope{threadID: toolTestThread},
+		toolTurnStarted(),
+		toolItemNotice(methodItemStart, commandItem(longID, "inProgress", "make", nil)),
+		toolItemNotice(methodItemEnd, commandItem(longID, "completed", "make", 0)),
+		toolTurnCompleted(),
+	)
+
+	if starts, finishes := startedIDs(events), finishedIDs(t, events); len(starts) != 0 || len(finishes) != 0 {
+		t.Fatalf("started = %d, finished = %d, want no call for an id over %d bytes", len(starts), len(finishes), maxCallIDBytes)
+	}
+	if bare := bareToolStarts(events); len(bare) != 1 || bare[0].Detail != "make" {
+		t.Fatalf("bare starts = %+v, want the start as a bare tool event", bare)
+	}
+}
+
+func TestCallIDAtTheLengthBoundOpensACall(t *testing.T) {
+	boundID := strings.Repeat("x", maxCallIDBytes)
+	events := runToolTurn(t, turnScope{threadID: toolTestThread},
+		toolTurnStarted(),
+		toolItemNotice(methodItemStart, commandItem(boundID, "inProgress", "make", nil)),
+		toolItemNotice(methodItemEnd, commandItem(boundID, "completed", "make", 0)),
+		toolTurnCompleted(),
+	)
+
+	if finishes := finishedIDs(t, events); len(finishes) != 1 || finishes[0] != boundID {
+		t.Fatalf("finished calls = %d, want the call whose id is exactly %d bytes", len(finishes), maxCallIDBytes)
+	}
+}
+
 func TestStartOfAFinishedCallInTheSameTurnEmitsABareToolEvent(t *testing.T) {
 	events := runToolTurn(t, turnScope{threadID: toolTestThread},
 		toolTurnStarted(),

@@ -96,11 +96,12 @@ id finished earlier in the same turn never starts a call again: its repeated
 start is bare, and its finish emits nothing. A start made while 256 calls are
 open is bare too, and its id is seen, so it stays bare for the rest of the turn
 even after a slot frees. Once 4096 ids are seen, every new start is bare. The
-first start refused by each bound in a turn logs a warning. A finish is emitted
-only for an open id, and it closes that id: it frees one of the 256 slots, but
-the id stays seen for the rest of the turn. A repeated or unknown finish emits
-nothing. A call still open when the turn ends keeps its start and never gets a
-finish.
+first start refused by each bound in an execution logs one warning, and a reset
+starts a new execution. An id longer than 256 bytes never opens a call: its
+start is bare and its finish emits nothing. A finish is emitted only for an open
+id, and it closes that id: it frees one of the 256 slots, but the id stays seen
+for the rest of the turn. A repeated or unknown finish emits nothing. A call
+still open when the turn ends keeps its start and never gets a finish.
 
 Compaction items follow the same rule. A compaction's finish is always
 `succeeded`, on its `item/completed`, because a `contextCompaction` item carries
@@ -206,16 +207,16 @@ not identify the compaction: a completion of another turn of the thread closes
 the compaction only if it carries that id. A compaction whose id never arrives
 waits for the context of its caller or its ten-minute deadline.
 
-An `error` notification with `willRetry` false is the failure,
-and the reader still waits for the `turn/completed` that follows it, so that
-completion never leaks into the next turn. An `error` with `willRetry` true is
-ignored, because the server retries it. An `item/started` of a `contextCompaction`
-item is reported as a `tool` event naming the tool call `compaction`, and its
+An `error` notification with `willRetry` false is the failure, and the reader
+still waits for the `turn/completed` that follows it, so that completion never
+leaks into the next turn. An `error` with `willRetry` true is ignored, because
+the server retries it. An `item/started` of a `contextCompaction` item is
+reported as a `tool` event naming the tool call `compaction`, and its
 `item/completed` closes that call as `tool_done` with state `succeeded`. That
 `succeeded` is deduced from `item/completed`: the schema carries no compaction
-state, so the item does not say whether the compaction worked. A failure shows in
-the turn error instead, which ends the turn with an error. The open-call rule of
-the tool calls section applies to compactions too. Any other item is silent.
+state, so the item does not say whether the compaction worked. A failure shows
+in the turn error instead, which ends the turn with an error. The open-call rule
+of the tool calls section applies to compactions too. Any other item is silent.
 
 The reader stops only on the `turn/completed` of its turn or on the context of
 its caller. An `error` with `willRetry` false followed by no `turn/completed`

@@ -13,6 +13,7 @@ const (
 	reasonCommandDeclined = "command declined"
 	maxOpenCalls          = 256
 	maxSeenCalls          = 4096
+	maxCallIDBytes        = 256
 )
 
 type callTracker struct {
@@ -23,11 +24,14 @@ type callTracker struct {
 }
 
 func (t *callTracker) begin(callID string) bool {
+	if len(callID) > maxCallIDBytes {
+		return false
+	}
 	if _, known := t.seen[callID]; known {
 		return false
 	}
 	if len(t.seen) >= maxSeenCalls {
-		t.reportSeenBound()
+		reportBoundOnce(&t.seenBoundReported, "max_seen", maxSeenCalls)
 		return false
 	}
 	if t.seen == nil {
@@ -36,27 +40,19 @@ func (t *callTracker) begin(callID string) bool {
 	}
 	t.seen[callID] = struct{}{}
 	if len(t.open) >= maxOpenCalls {
-		t.reportOpenBound()
+		reportBoundOnce(&t.openBoundReported, "max_open", maxOpenCalls)
 		return false
 	}
 	t.open[callID] = struct{}{}
 	return true
 }
 
-func (t *callTracker) reportOpenBound() {
-	if t.openBoundReported {
+func reportBoundOnce(reported *bool, bound string, limit int) {
+	if *reported {
 		return
 	}
-	t.openBoundReported = true
-	slog.Warn("tool calls reach the open bound of the turn, later starts carry no lifecycle", "max_open", maxOpenCalls)
-}
-
-func (t *callTracker) reportSeenBound() {
-	if t.seenBoundReported {
-		return
-	}
-	t.seenBoundReported = true
-	slog.Warn("tool calls reach the seen bound of the turn, later starts carry no lifecycle", "max_seen", maxSeenCalls)
+	*reported = true
+	slog.Warn("tool calls reach a bound of the execution, later starts carry no lifecycle", "bound", bound, "limit", limit)
 }
 
 func (t *callTracker) end(callID string) bool {
