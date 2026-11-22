@@ -86,15 +86,16 @@ Each turn keeps two sets of ids, dropped when the turn ends, so nothing carries
 over to the next turn or to a reset:
 
 - the open calls, at most 256 at the same time;
-- the seen ids, every id that has opened a call in the turn, open or finished,
-  at most 4096.
+- the seen ids, every id that has started in the turn, whether it opened a
+  call, finished one or was refused by the open bound, at most 4096.
 
 A start opens a call only when its id is not seen yet, the open calls are under
 256, and the seen ids are under 4096. Any other start is emitted as a bare `tool`
 event without a `ToolCall`, and it leaves the open calls untouched. So an id
 finished earlier in the same turn never starts a call again: its repeated start
-is bare, and so is its finish. A start made while 256 calls are open is bare
-too, and the same holds once 4096 ids are seen. A finish is emitted only for an
+is bare, and its finish emits nothing. A start made while 256 calls are open is
+bare too, and its id is seen, so it stays bare for the rest of the turn even
+after a slot frees. Once 4096 ids are seen, every new start is bare. A finish is emitted only for an
 open id, and it closes that id: it frees one of the 256 slots, but the id stays
 seen for the rest of the turn. A repeated or unknown finish emits nothing.
 Compaction items follow the same rule.

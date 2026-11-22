@@ -259,6 +259,31 @@ func TestClosedCallFreesItsOpenSlot(t *testing.T) {
 	}
 }
 
+func TestStartRefusedByTheOpenBoundStaysBareAfterASlotFrees(t *testing.T) {
+	refused := numberedCallID(maxOpenCalls + 1)
+	messages := []map[string]any{toolTurnStarted()}
+	for index := 1; index <= maxOpenCalls; index++ {
+		messages = append(messages, toolItemNotice(methodItemStart, commandItem(numberedCallID(index), "inProgress", "step", nil)))
+	}
+	messages = append(messages,
+		toolItemNotice(methodItemStart, commandItem(refused, "inProgress", "step", nil)),
+		toolItemNotice(methodItemEnd, commandItem(numberedCallID(1), "completed", "step", 0)),
+		toolItemNotice(methodItemStart, commandItem(refused, "inProgress", "step", nil)),
+		toolItemNotice(methodItemEnd, commandItem(refused, "completed", "step", 0)),
+		toolTurnCompleted(),
+	)
+	events := runToolTurn(t, turnScope{threadID: toolTestThread}, messages...)
+
+	for _, id := range startedIDs(events) {
+		if id == refused {
+			t.Fatalf("call %s started although its first start was refused by the open bound", id)
+		}
+	}
+	if finishes := finishedIDs(t, events); len(finishes) != 1 || finishes[0] != numberedCallID(1) {
+		t.Fatalf("finished calls = %v, want call 1 only", finishes)
+	}
+}
+
 func TestSeenCallsAreBoundedPerTurn(t *testing.T) {
 	messages := []map[string]any{toolTurnStarted()}
 	for index := 1; index <= maxSeenCalls+1; index++ {
@@ -308,12 +333,12 @@ func startedIDs(events []contracts.BackendEvent) []string {
 	return starts
 }
 
-func finishedIDs(t *testing.T, events []contracts.BackendEvent) []string {
-	t.Helper()
+func finishedIDs(tb testing.TB, events []contracts.BackendEvent) []string {
+	tb.Helper()
 	var finishes []string
 	for index := range events {
 		if events[index].Kind == contracts.BackendKindToolDone {
-			finishes = append(finishes, mustToolCall(t, events[index]).ID)
+			finishes = append(finishes, mustToolCall(tb, events[index]).ID)
 		}
 	}
 	return finishes
@@ -441,10 +466,10 @@ func commandItem(id, status, command string, exitCode any) map[string]any {
 	}
 }
 
-func mustToolCall(t *testing.T, event contracts.BackendEvent) contracts.ToolCall {
-	t.Helper()
+func mustToolCall(tb testing.TB, event contracts.BackendEvent) contracts.ToolCall {
+	tb.Helper()
 	if event.ToolCall == nil {
-		t.Fatalf("event %q carries no tool call: %+v", event.Kind, event)
+		tb.Fatalf("event %q carries no tool call: %+v", event.Kind, event)
 	}
 	return *event.ToolCall
 }

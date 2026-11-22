@@ -20,15 +20,18 @@ type callTracker struct {
 }
 
 func (t *callTracker) begin(callID string) bool {
-	if _, known := t.seen[callID]; known || len(t.open) >= maxOpenCalls || len(t.seen) >= maxSeenCalls {
+	if _, known := t.seen[callID]; known || len(t.seen) >= maxSeenCalls {
 		return false
 	}
 	if t.seen == nil {
 		t.open = make(map[string]struct{})
 		t.seen = make(map[string]struct{})
 	}
-	t.open[callID] = struct{}{}
 	t.seen[callID] = struct{}{}
+	if len(t.open) >= maxOpenCalls {
+		return false
+	}
+	t.open[callID] = struct{}{}
 	return true
 }
 
