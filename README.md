@@ -66,7 +66,9 @@ the same `ID`, with `Tool` and `Detail` left empty on the event:
 
 - `completed` with no exit code, or with exit code 0: `succeeded`.
 - `completed` with a non-zero exit code, or `failed`: `failed`, with `Error` set
-  to `exit code N`, or to `command failed` when no exit code came.
+  to `exit code N`, or to `command failed` when no exit code came. An exit code
+  counts only when it is an integer in the int32 range; any other number, such
+  as `0.5` or `1e19`, counts as no exit code.
 - `declined`: `failed`, with `Error` set to `command declined`.
 - Any other status at the end, such as `inProgress`: the start only, with no
   finish.
@@ -80,15 +82,22 @@ not its item still carries the command text.
 type that this backend reports as a tool call. Every event it emits passes
 `BackendEvent.ValidateToolCall`.
 
-Each turn keeps its own set of open calls, by id, at most 256 of them. The set
-is dropped when the turn ends, so nothing carries over to the next turn or to a
-reset. A start whose id is already open, or that would make 256 open calls, is
-emitted as a bare `tool` event without a `ToolCall`, and it leaves the open call
-untouched. A finish is emitted only for an open id, and it closes that id. A
-repeated or unknown finish emits nothing. So a start beyond the bound never
-leaves as `started`, and its finish never leaves as `tool_done`. An id that was
-already finished earlier in the same turn is not open any more: a new start with
-that id is emitted as `started` again. Compaction items follow the same rule.
+Each turn keeps two sets of ids, dropped when the turn ends, so nothing carries
+over to the next turn or to a reset:
+
+- the open calls, at most 256 at the same time;
+- the seen ids, every id that has opened a call in the turn, open or finished,
+  at most 4096.
+
+A start opens a call only when its id is not seen yet, the open calls are under
+256, and the seen ids are under 4096. Any other start is emitted as a bare `tool`
+event without a `ToolCall`, and it leaves the open calls untouched. So an id
+finished earlier in the same turn never starts a call again: its repeated start
+is bare, and so is its finish. A start made while 256 calls are open is bare
+too, and the same holds once 4096 ids are seen. A finish is emitted only for an
+open id, and it closes that id: it frees one of the 256 slots, but the id stays
+seen for the rest of the turn. A repeated or unknown finish emits nothing.
+Compaction items follow the same rule.
 
 ## Approvals
 

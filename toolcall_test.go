@@ -85,6 +85,13 @@ func TestCommandOutcomeEndsItsCallWithTheStateOfItsItem(t *testing.T) {
 		{name: "failed without exit code", status: "failed", exitCode: nil, wantState: contracts.ToolCallFailed, wantError: reasonCommandFailed},
 		{name: "failed with a non zero exit code", status: "failed", exitCode: 127, wantState: contracts.ToolCallFailed, wantError: "exit code 127"},
 		{name: "failed with an exit code of a million", status: "failed", exitCode: 1000000, wantState: contracts.ToolCallFailed, wantError: "exit code 1000000"},
+		{name: "failed with the largest int32 exit code", status: "failed", exitCode: 2147483647, wantState: contracts.ToolCallFailed, wantError: "exit code 2147483647"},
+		{name: "failed with an exit code just beyond int32", status: "failed", exitCode: 2147483648, wantState: contracts.ToolCallFailed, wantError: reasonCommandFailed},
+		{name: "failed with a fractional exit code of one half", status: "failed", exitCode: 0.5, wantState: contracts.ToolCallFailed, wantError: reasonCommandFailed},
+		{name: "failed with a fractional exit code of one and a half", status: "failed", exitCode: 1.5, wantState: contracts.ToolCallFailed, wantError: reasonCommandFailed},
+		{name: "failed with an exit code of 1e19", status: "failed", exitCode: 1e19, wantState: contracts.ToolCallFailed, wantError: reasonCommandFailed},
+		{name: "completed with a fractional exit code of one half", status: "completed", exitCode: 0.5, wantState: contracts.ToolCallSucceeded},
+		{name: "completed with an exit code of 1e19", status: "completed", exitCode: 1e19, wantState: contracts.ToolCallSucceeded},
 		{name: "declined by the operator", status: "declined", exitCode: nil, wantState: contracts.ToolCallFailed, wantError: reasonCommandDeclined},
 	}
 	for _, tt := range tests {
@@ -214,17 +221,7 @@ func TestOpenCallsAreBoundedPerTurn(t *testing.T) {
 	messages = append(messages, toolTurnCompleted())
 	events := runToolTurn(t, turnScope{threadID: toolTestThread}, messages...)
 
-	var starts, finishes []string
-	for index := range events {
-		switch events[index].Kind {
-		case contracts.BackendKindTool:
-			if events[index].ToolCall != nil {
-				starts = append(starts, events[index].ToolCall.ID)
-			}
-		case contracts.BackendKindToolDone:
-			finishes = append(finishes, mustToolCall(t, events[index]).ID)
-		}
-	}
+	starts, finishes := startedAndFinishedIDs(t, events)
 	if len(starts) != maxOpenCalls || starts[0] != numberedCallID(1) || starts[maxOpenCalls-1] != numberedCallID(maxOpenCalls) {
 		t.Fatalf("started calls = %d, want the first %d only", len(starts), maxOpenCalls)
 	}
@@ -236,6 +233,82 @@ func TestOpenCallsAreBoundedPerTurn(t *testing.T) {
 			t.Fatalf("call %s was finished although it never started as a call", id)
 		}
 	}
+}
+
+func TestClosedCallFreesItsOpenSlot(t *testing.T) {
+	messages := []map[string]any{toolTurnStarted()}
+	for index := 1; index <= maxOpenCalls; index++ {
+		messages = append(messages, toolItemNotice(methodItemStart, commandItem(numberedCallID(index), "inProgress", "step", nil)))
+	}
+	messages = append(messages,
+		toolItemNotice(methodItemEnd, commandItem(numberedCallID(1), "completed", "step", 0)),
+		toolItemNotice(methodItemStart, commandItem(numberedCallID(maxOpenCalls+1), "inProgress", "step", nil)),
+		toolItemNotice(methodItemEnd, commandItem(numberedCallID(maxOpenCalls+1), "completed", "step", 0)),
+		toolTurnCompleted(),
+	)
+	events := runToolTurn(t, turnScope{threadID: toolTestThread}, messages...)
+
+	starts, finishes := startedAndFinishedIDs(t, events)
+	if len(starts) != maxOpenCalls+1 || starts[maxOpenCalls] != numberedCallID(maxOpenCalls+1) {
+		t.Fatalf("started calls = %d, want the start that follows a closed call to start", len(starts))
+	}
+	if len(finishes) != 2 || finishes[0] != numberedCallID(1) || finishes[1] != numberedCallID(maxOpenCalls+1) {
+		t.Fatalf("finished calls = %v, want calls 1 and %d", finishes, maxOpenCalls+1)
+	}
+}
+
+func TestSeenCallsAreBoundedPerTurn(t *testing.T) {
+	messages := []map[string]any{toolTurnStarted()}
+	for index := 1; index <= maxSeenCalls+1; index++ {
+		id := numberedCallID(index)
+		messages = append(messages,
+			toolItemNotice(methodItemStart, commandItem(id, "inProgress", "step", nil)),
+			toolItemNotice(methodItemEnd, commandItem(id, "completed", "step", 0)),
+		)
+	}
+	messages = append(messages, toolTurnCompleted())
+	events := runToolTurn(t, turnScope{threadID: toolTestThread}, messages...)
+
+	starts, finishes := startedAndFinishedIDs(t, events)
+	if len(starts) != maxSeenCalls || starts[maxSeenCalls-1] != numberedCallID(maxSeenCalls) {
+		t.Fatalf("started calls = %d, want the first %d only", len(starts), maxSeenCalls)
+	}
+	if len(finishes) != maxSeenCalls || finishes[maxSeenCalls-1] != numberedCallID(maxSeenCalls) {
+		t.Fatalf("finished calls = %d, want the %d started calls only", len(finishes), maxSeenCalls)
+	}
+}
+
+func TestStartOfAFinishedCallInTheSameTurnEmitsABareToolEvent(t *testing.T) {
+	events := runToolTurn(t, turnScope{threadID: toolTestThread},
+		toolTurnStarted(),
+		toolItemNotice(methodItemStart, commandItem("call-11", "inProgress", "make", nil)),
+		toolItemNotice(methodItemEnd, commandItem("call-11", "completed", "make", 0)),
+		toolItemNotice(methodItemStart, commandItem("call-11", "inProgress", "make", nil)),
+		toolItemNotice(methodItemEnd, commandItem("call-11", "completed", "make", 0)),
+		toolTurnCompleted(),
+	)
+	if got := kindsOf(events); !equalStrings(got, []string{contracts.BackendKindTool, contracts.BackendKindToolDone, contracts.BackendKindTool, eventResult}) {
+		t.Fatalf("kinds = %v, want one started call and its finish, then a bare tool event and no finish", got)
+	}
+	if events[2].ToolCall != nil || events[2].Tool != toolCommand || events[2].Detail != "make" {
+		t.Fatalf("repeated start = %+v, want a bare tool event", events[2])
+	}
+}
+
+func startedAndFinishedIDs(t *testing.T, events []contracts.BackendEvent) ([]string, []string) {
+	t.Helper()
+	var starts, finishes []string
+	for index := range events {
+		switch events[index].Kind {
+		case contracts.BackendKindTool:
+			if events[index].ToolCall != nil {
+				starts = append(starts, events[index].ToolCall.ID)
+			}
+		case contracts.BackendKindToolDone:
+			finishes = append(finishes, mustToolCall(t, events[index]).ID)
+		}
+	}
+	return starts, finishes
 }
 
 func TestOpenCallsDoNotSurviveTheTurn(t *testing.T) {

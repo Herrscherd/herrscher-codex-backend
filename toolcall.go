@@ -1,6 +1,7 @@
 package codex
 
 import (
+	"math"
 	"strconv"
 
 	contracts "github.com/Herrscherd/herrscher-contracts"
@@ -10,28 +11,32 @@ const (
 	reasonCommandFailed   = "command failed"
 	reasonCommandDeclined = "command declined"
 	maxOpenCalls          = 256
+	maxSeenCalls          = 4096
 )
 
 type callTracker struct {
-	ids map[string]struct{}
+	open map[string]struct{}
+	seen map[string]struct{}
 }
 
 func (t *callTracker) begin(callID string) bool {
-	if _, open := t.ids[callID]; open || len(t.ids) >= maxOpenCalls {
+	if _, known := t.seen[callID]; known || len(t.open) >= maxOpenCalls || len(t.seen) >= maxSeenCalls {
 		return false
 	}
-	if t.ids == nil {
-		t.ids = make(map[string]struct{})
+	if t.seen == nil {
+		t.open = make(map[string]struct{})
+		t.seen = make(map[string]struct{})
 	}
-	t.ids[callID] = struct{}{}
+	t.open[callID] = struct{}{}
+	t.seen[callID] = struct{}{}
 	return true
 }
 
 func (t *callTracker) end(callID string) bool {
-	if _, open := t.ids[callID]; !open {
+	if _, open := t.open[callID]; !open {
 		return false
 	}
-	delete(t.ids, callID)
+	delete(t.open, callID)
 	return true
 }
 
@@ -76,11 +81,19 @@ func commandOutcome(item map[string]any) (contracts.ToolCallState, string, bool)
 }
 
 func nonZeroExit(item map[string]any) (string, bool) {
-	code, ok := numberField(item, fieldExitCode)
+	code, ok := exitCodeField(item)
 	if !ok || code == 0 {
 		return "", false
 	}
-	return "exit code " + strconv.FormatInt(int64(code), 10), true
+	return "exit code " + strconv.Itoa(code), true
+}
+
+func exitCodeField(item map[string]any) (int, bool) {
+	value, ok := numberField(item, fieldExitCode)
+	if !ok || value != math.Trunc(value) || value < math.MinInt32 || value > math.MaxInt32 {
+		return 0, false
+	}
+	return int(value), true
 }
 
 func (c *turnCollector) emitToolStart(item map[string]any, tool, detail string) {
