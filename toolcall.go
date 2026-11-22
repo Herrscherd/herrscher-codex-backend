@@ -16,22 +16,22 @@ type callTracker struct {
 	ids map[string]struct{}
 }
 
-func (t *callTracker) begin(id string) bool {
-	if _, open := t.ids[id]; open || len(t.ids) >= maxOpenCalls {
+func (t *callTracker) begin(callID string) bool {
+	if _, open := t.ids[callID]; open || len(t.ids) >= maxOpenCalls {
 		return false
 	}
 	if t.ids == nil {
 		t.ids = make(map[string]struct{})
 	}
-	t.ids[id] = struct{}{}
+	t.ids[callID] = struct{}{}
 	return true
 }
 
-func (t *callTracker) end(id string) bool {
-	if _, open := t.ids[id]; !open {
+func (t *callTracker) end(callID string) bool {
+	if _, open := t.ids[callID]; !open {
 		return false
 	}
-	delete(t.ids, id)
+	delete(t.ids, callID)
 	return true
 }
 
