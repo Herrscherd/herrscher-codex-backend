@@ -60,9 +60,9 @@ turn parameter instead, because the Codex CLI rejects those flags before
 ## Tool calls
 
 A command execution is a tool call named `command`, its command in `Detail`. Its
-`item/started` is a `tool` event carrying a `started` call whose `ID` is the item
-id. Its `item/completed` is a `tool_done` event carrying the finished call under
-the same `ID`, with `Tool` and `Detail` left empty on the event:
+`item/started` is a `tool` event carrying a `started` call whose `ID` is the
+item id. Its `item/completed` is a `tool_done` event carrying the finished call
+under the same `ID`, with `Tool` and `Detail` left empty on the event:
 
 - `completed` with no exit code, or with exit code 0: `succeeded`.
 - `completed` with a non-zero exit code, or `failed`: `failed`, with `Error` set
@@ -73,32 +73,38 @@ the same `ID`, with `Tool` and `Detail` left empty on the event:
 - Any other status at the end, such as `inProgress`: the start only, with no
   finish.
 
-A command whose `command` text is empty emits no start, so its finish finds no
-open call and emits nothing. A finish closes the call its id opened, whether or
-not its item still carries the command text.
+A command whose start has an empty `command` text emits no start, so its finish
+finds no open call and emits nothing. A finish closes the call its id opened,
+whether or not its item still carries the command text.
 
-`Error` never carries the command output. An item with no id emits its start as a
-`tool` event without a `ToolCall`, and no finish. The protocol has no other item
-type that this backend reports as a tool call. Every event it emits passes
+`Error` never carries the command output. An item with no id emits its start as
+a `tool` event without a `ToolCall`, and no finish. The protocol has no other
+item type that this backend reports as a tool call. Every event it emits passes
 `BackendEvent.ValidateToolCall`.
 
 Each turn keeps two sets of ids, dropped when the turn ends, so nothing carries
 over to the next turn or to a reset:
 
 - the open calls, at most 256 at the same time;
-- the seen ids, every id that has started in the turn, whether it opened a
-  call, finished one or was refused by the open bound, at most 4096.
+- the seen ids, every id that has started in the turn, whether it opened a call,
+  finished one or was refused by the open bound, at most 4096.
 
 A start opens a call only when its id is not seen yet, the open calls are under
-256, and the seen ids are under 4096. Any other start is emitted as a bare `tool`
-event without a `ToolCall`, and it leaves the open calls untouched. So an id
-finished earlier in the same turn never starts a call again: its repeated start
-is bare, and its finish emits nothing. A start made while 256 calls are open is
-bare too, and its id is seen, so it stays bare for the rest of the turn even
-after a slot frees. Once 4096 ids are seen, every new start is bare. A finish is emitted only for an
-open id, and it closes that id: it frees one of the 256 slots, but the id stays
-seen for the rest of the turn. A repeated or unknown finish emits nothing.
-Compaction items follow the same rule.
+256, and the seen ids are under 4096. Any other start is emitted as a bare
+`tool` event without a `ToolCall`, and it leaves the open calls untouched. So an
+id finished earlier in the same turn never starts a call again: its repeated
+start is bare, and its finish emits nothing. A start made while 256 calls are
+open is bare too, and its id is seen, so it stays bare for the rest of the turn
+even after a slot frees. Once 4096 ids are seen, every new start is bare. The
+first start refused by each bound in a turn logs a warning. A finish is emitted
+only for an open id, and it closes that id: it frees one of the 256 slots, but
+the id stays seen for the rest of the turn. A repeated or unknown finish emits
+nothing. A call still open when the turn ends keeps its start and never gets a
+finish.
+
+Compaction items follow the same rule. A compaction's finish is always
+`succeeded`, on its `item/completed`, because a `contextCompaction` item carries
+no status: a failed compaction fails the turn, not the call.
 
 ## Approvals
 

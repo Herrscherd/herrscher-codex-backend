@@ -282,6 +282,19 @@ func TestStartRefusedByTheOpenBoundStaysBareAfterASlotFrees(t *testing.T) {
 	if finishes := finishedIDs(t, events); len(finishes) != 1 || finishes[0] != numberedCallID(1) {
 		t.Fatalf("finished calls = %v, want call 1 only", finishes)
 	}
+	if bare := bareToolStarts(events); len(bare) != 2 || bare[0].Detail != "step" || bare[1].Detail != "step" {
+		t.Fatalf("bare starts = %+v, want both starts of the refused call as bare tool events", bare)
+	}
+}
+
+func bareToolStarts(events []contracts.BackendEvent) []contracts.BackendEvent {
+	var bare []contracts.BackendEvent
+	for index := range events {
+		if events[index].Kind == contracts.BackendKindTool && events[index].ToolCall == nil {
+			bare = append(bare, events[index])
+		}
+	}
+	return bare
 }
 
 func TestSeenCallsAreBoundedPerTurn(t *testing.T) {
@@ -421,21 +434,21 @@ func TestEveryEmittedToolEventValidates(t *testing.T) {
 	}
 }
 
-func runToolTurn(t *testing.T, scope turnScope, messages ...map[string]any) []contracts.BackendEvent {
-	t.Helper()
+func runToolTurn(tb testing.TB, scope turnScope, messages ...map[string]any) []contracts.BackendEvent {
+	tb.Helper()
 	var input strings.Builder
 	for _, message := range messages {
 		line, err := json.Marshal(message)
 		if err != nil {
-			t.Fatal(err)
+			tb.Fatal(err)
 		}
 		_, _ = input.Write(line)
 		_, _ = input.WriteString("\n")
 	}
 	var events []contracts.BackendEvent
 	onEvent := func(event contracts.BackendEvent) { events = append(events, event) }
-	if _, err := readTurn(t.Context(), bufio.NewReader(strings.NewReader(input.String())), scope, onEvent, nil, nil); err != nil {
-		t.Fatalf("readTurn: %v", err)
+	if _, err := readTurn(tb.Context(), bufio.NewReader(strings.NewReader(input.String())), scope, onEvent, nil, nil); err != nil {
+		tb.Fatalf("readTurn: %v", err)
 	}
 	return events
 }

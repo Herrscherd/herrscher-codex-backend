@@ -1,6 +1,7 @@
 package codex
 
 import (
+	"log/slog"
 	"math"
 	"strconv"
 
@@ -15,12 +16,18 @@ const (
 )
 
 type callTracker struct {
-	open map[string]struct{}
-	seen map[string]struct{}
+	open              map[string]struct{}
+	seen              map[string]struct{}
+	openBoundReported bool
+	seenBoundReported bool
 }
 
 func (t *callTracker) begin(callID string) bool {
-	if _, known := t.seen[callID]; known || len(t.seen) >= maxSeenCalls {
+	if _, known := t.seen[callID]; known {
+		return false
+	}
+	if len(t.seen) >= maxSeenCalls {
+		t.reportSeenBound()
 		return false
 	}
 	if t.seen == nil {
@@ -29,10 +36,27 @@ func (t *callTracker) begin(callID string) bool {
 	}
 	t.seen[callID] = struct{}{}
 	if len(t.open) >= maxOpenCalls {
+		t.reportOpenBound()
 		return false
 	}
 	t.open[callID] = struct{}{}
 	return true
+}
+
+func (t *callTracker) reportOpenBound() {
+	if t.openBoundReported {
+		return
+	}
+	t.openBoundReported = true
+	slog.Warn("tool calls reach the open bound of the turn, later starts carry no lifecycle", "max_open", maxOpenCalls)
+}
+
+func (t *callTracker) reportSeenBound() {
+	if t.seenBoundReported {
+		return
+	}
+	t.seenBoundReported = true
+	slog.Warn("tool calls reach the seen bound of the turn, later starts carry no lifecycle", "max_seen", maxSeenCalls)
 }
 
 func (t *callTracker) end(callID string) bool {
