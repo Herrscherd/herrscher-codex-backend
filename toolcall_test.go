@@ -295,9 +295,8 @@ func TestStartOfAFinishedCallInTheSameTurnEmitsABareToolEvent(t *testing.T) {
 	}
 }
 
-func startedAndFinishedIDs(t *testing.T, events []contracts.BackendEvent) ([]string, []string) {
+func startedAndFinishedIDs(t *testing.T, events []contracts.BackendEvent) (starts, finishes []string) {
 	t.Helper()
-	var starts, finishes []string
 	for index := range events {
 		switch events[index].Kind {
 		case contracts.BackendKindTool:
