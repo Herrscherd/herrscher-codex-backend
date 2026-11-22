@@ -9,7 +9,31 @@ import (
 const (
 	reasonCommandFailed   = "command failed"
 	reasonCommandDeclined = "command declined"
+	maxOpenCalls          = 256
 )
+
+type callTracker struct {
+	ids map[string]struct{}
+}
+
+func (t *callTracker) begin(id string) bool {
+	if _, open := t.ids[id]; open || len(t.ids) >= maxOpenCalls {
+		return false
+	}
+	if t.ids == nil {
+		t.ids = make(map[string]struct{})
+	}
+	t.ids[id] = struct{}{}
+	return true
+}
+
+func (t *callTracker) end(id string) bool {
+	if _, open := t.ids[id]; !open {
+		return false
+	}
+	delete(t.ids, id)
+	return true
+}
 
 func isCommandItem(item map[string]any) bool {
 	itemType := stringField(item, fieldType)
@@ -25,6 +49,9 @@ func (c *turnCollector) startCommand(item map[string]any) {
 }
 
 func (c *turnCollector) finishCommand(item map[string]any) {
+	if stringField(item, fieldCommand) == "" {
+		return
+	}
 	state, reason, finished := commandOutcome(item)
 	if !finished {
 		return
@@ -56,12 +83,12 @@ func nonZeroExit(item map[string]any) (string, bool) {
 	if !ok || code == 0 {
 		return "", false
 	}
-	return "exit code " + strconv.FormatFloat(code, 'g', -1, 64), true
+	return "exit code " + strconv.FormatInt(int64(code), 10), true
 }
 
 func (c *turnCollector) emitToolStart(item map[string]any, tool, detail string) {
 	event := contracts.BackendEvent{Kind: contracts.BackendKindTool, Tool: tool, Detail: detail}
-	if id := stringField(item, fieldID); id != "" {
+	if id := stringField(item, fieldID); id != "" && c.calls.begin(id) {
 		event.ToolCall = &contracts.ToolCall{ID: id, Tool: tool, Detail: detail, State: contracts.ToolCallStarted}
 	}
 	c.emit(event)
@@ -69,7 +96,7 @@ func (c *turnCollector) emitToolStart(item map[string]any, tool, detail string) 
 
 func (c *turnCollector) emitToolDone(item map[string]any, tool string, state contracts.ToolCallState, reason string) {
 	callID := stringField(item, fieldID)
-	if callID == "" {
+	if callID == "" || !c.calls.end(callID) {
 		return
 	}
 	c.emit(contracts.BackendEvent{

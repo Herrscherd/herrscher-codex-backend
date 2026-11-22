@@ -71,10 +71,24 @@ the same `ID`, with `Tool` and `Detail` left empty on the event:
 - Any other status at the end, such as `inProgress`: the start only, with no
   finish.
 
+A command whose `command` text is empty emits neither a start nor a finish. A
+finish whose item carries no command text is ignored the same way, so its call
+stays open until the turn ends.
+
 `Error` never carries the command output. An item with no id emits its start as a
 `tool` event without a `ToolCall`, and no finish. The protocol has no other item
 type that this backend reports as a tool call. Every event it emits passes
 `BackendEvent.ValidateToolCall`.
+
+Each turn keeps its own set of open calls, by id, at most 256 of them. The set
+is dropped when the turn ends, so nothing carries over to the next turn or to a
+reset. A start whose id is already open, or that would make 256 open calls, is
+emitted as a bare `tool` event without a `ToolCall`, and it leaves the open call
+untouched. A finish is emitted only for an open id, and it closes that id. A
+repeated or unknown finish emits nothing. So a start beyond the bound never
+leaves as `started`, and its finish never leaves as `tool_done`. An id that was
+already finished earlier in the same turn is not open any more: a new start with
+that id is emitted as `started` again. Compaction items follow the same rule.
 
 ## Approvals
 
@@ -181,9 +195,11 @@ and the reader still waits for the `turn/completed` that follows it, so that
 completion never leaks into the next turn. An `error` with `willRetry` true is
 ignored, because the server retries it. An `item/started` of a `contextCompaction`
 item is reported as a `tool` event naming the tool call `compaction`, and its
-`item/completed` closes that call as `tool_done` with state `succeeded`. The
-item carries no failure state: a compaction that fails ends the turn with an
-error instead. Any other item is silent.
+`item/completed` closes that call as `tool_done` with state `succeeded`. That
+`succeeded` is deduced from `item/completed`: the schema carries no compaction
+state, so the item does not say whether the compaction worked. A failure shows in
+the turn error instead, which ends the turn with an error. The open-call rule of
+the tool calls section applies to compactions too. Any other item is silent.
 
 The reader stops only on the `turn/completed` of its turn or on the context of
 its caller. An `error` with `willRetry` false followed by no `turn/completed`

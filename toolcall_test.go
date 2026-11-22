@@ -3,6 +3,7 @@ package codex
 import (
 	"bufio"
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -83,6 +84,7 @@ func TestCommandOutcomeEndsItsCallWithTheStateOfItsItem(t *testing.T) {
 		{name: "completed with a non zero exit code", status: "completed", exitCode: 1, wantState: contracts.ToolCallFailed, wantError: "exit code 1"},
 		{name: "failed without exit code", status: "failed", exitCode: nil, wantState: contracts.ToolCallFailed, wantError: reasonCommandFailed},
 		{name: "failed with a non zero exit code", status: "failed", exitCode: 127, wantState: contracts.ToolCallFailed, wantError: "exit code 127"},
+		{name: "failed with an exit code of a million", status: "failed", exitCode: 1000000, wantState: contracts.ToolCallFailed, wantError: "exit code 1000000"},
 		{name: "declined by the operator", status: "declined", exitCode: nil, wantState: contracts.ToolCallFailed, wantError: reasonCommandDeclined},
 	}
 	for _, tt := range tests {
@@ -127,6 +129,149 @@ func TestCommandWithoutItemIDEmitsAStartWithoutACall(t *testing.T) {
 	}
 	if events[0].ToolCall != nil || events[0].Tool != toolCommand || events[0].Detail != "ls" {
 		t.Fatalf("event = %+v, want a legacy tool event without a call", events[0])
+	}
+}
+
+func TestCommandWithoutTextEmitsNeitherStartNorFinish(t *testing.T) {
+	events := runToolTurn(t, turnScope{threadID: toolTestThread},
+		toolTurnStarted(),
+		toolItemNotice(methodItemStart, commandItem("call-6", "inProgress", "", nil)),
+		toolItemNotice(methodItemEnd, commandItem("call-6", "completed", "", 0)),
+		toolTurnCompleted(),
+	)
+	if got := kindsOf(events); !equalStrings(got, []string{eventResult}) {
+		t.Fatalf("kinds = %v, want the result alone", got)
+	}
+}
+
+func TestCommandFinishWithoutTextEmitsNoFinish(t *testing.T) {
+	events := runToolTurn(t, turnScope{threadID: toolTestThread},
+		toolTurnStarted(),
+		toolItemNotice(methodItemStart, commandItem("call-6", "inProgress", "ls", nil)),
+		toolItemNotice(methodItemEnd, commandItem("call-6", "completed", "", 0)),
+		toolTurnCompleted(),
+	)
+	if got := kindsOf(events); !equalStrings(got, []string{contracts.BackendKindTool, eventResult}) {
+		t.Fatalf("kinds = %v, want the start alone before the result", got)
+	}
+}
+
+func TestRepeatedStartOfAnOpenCallEmitsAToolEventWithoutCall(t *testing.T) {
+	events := runToolTurn(t, turnScope{threadID: toolTestThread},
+		toolTurnStarted(),
+		toolItemNotice(methodItemStart, commandItem("call-7", "inProgress", "go test ./...", nil)),
+		toolItemNotice(methodItemStart, commandItem("call-7", "inProgress", "go test ./...", nil)),
+		toolItemNotice(methodItemEnd, commandItem("call-7", "completed", "go test ./...", 0)),
+		toolTurnCompleted(),
+	)
+	if got := kindsOf(events); !equalStrings(got, []string{contracts.BackendKindTool, contracts.BackendKindTool, contracts.BackendKindToolDone, eventResult}) {
+		t.Fatalf("kinds = %v, want one started call, a bare tool event, then one finish", got)
+	}
+	if events[1].ToolCall != nil || events[1].Tool != toolCommand || events[1].Detail != "go test ./..." {
+		t.Fatalf("repeated start = %+v, want a bare tool event", events[1])
+	}
+	if call := mustToolCall(t, events[2]); call.ID != "call-7" || call.State != contracts.ToolCallSucceeded {
+		t.Fatalf("finish = %+v, want call-7 succeeded: the repeated start must not touch the open call", call)
+	}
+}
+
+func TestRepeatedFinishOfACallEmitsOnce(t *testing.T) {
+	events := runToolTurn(t, turnScope{threadID: toolTestThread},
+		toolTurnStarted(),
+		toolItemNotice(methodItemStart, commandItem("call-8", "inProgress", "make", nil)),
+		toolItemNotice(methodItemEnd, commandItem("call-8", "completed", "make", 0)),
+		toolItemNotice(methodItemEnd, commandItem("call-8", "completed", "make", 0)),
+		toolTurnCompleted(),
+	)
+	if got := kindsOf(events); !equalStrings(got, []string{contracts.BackendKindTool, contracts.BackendKindToolDone, eventResult}) {
+		t.Fatalf("kinds = %v, want one finish for call-8", got)
+	}
+}
+
+func TestFinishOfAnUnknownCallEmitsNothing(t *testing.T) {
+	events := runToolTurn(t, turnScope{threadID: toolTestThread},
+		toolTurnStarted(),
+		toolItemNotice(methodItemEnd, commandItem("call-9", "completed", "make", 0)),
+		toolTurnCompleted(),
+	)
+	if got := kindsOf(events); !equalStrings(got, []string{eventResult}) {
+		t.Fatalf("kinds = %v, want the result alone", got)
+	}
+}
+
+func TestOpenCallsAreBoundedPerTurn(t *testing.T) {
+	var messages []map[string]any
+	messages = append(messages, toolTurnStarted())
+	for index := 1; index <= maxOpenCalls+1; index++ {
+		messages = append(messages, toolItemNotice(methodItemStart, commandItem(numberedCallID(index), "inProgress", "step", nil)))
+	}
+	for index := 1; index <= maxOpenCalls+1; index++ {
+		messages = append(messages, toolItemNotice(methodItemEnd, commandItem(numberedCallID(index), "completed", "step", 0)))
+	}
+	messages = append(messages, toolTurnCompleted())
+	events := runToolTurn(t, turnScope{threadID: toolTestThread}, messages...)
+
+	var starts, finishes []string
+	for index := range events {
+		switch events[index].Kind {
+		case contracts.BackendKindTool:
+			if events[index].ToolCall != nil {
+				starts = append(starts, events[index].ToolCall.ID)
+			}
+		case contracts.BackendKindToolDone:
+			finishes = append(finishes, mustToolCall(t, events[index]).ID)
+		}
+	}
+	if len(starts) != maxOpenCalls || starts[0] != numberedCallID(1) || starts[maxOpenCalls-1] != numberedCallID(maxOpenCalls) {
+		t.Fatalf("started calls = %d, want the first %d only", len(starts), maxOpenCalls)
+	}
+	if len(finishes) != maxOpenCalls || finishes[maxOpenCalls-1] != numberedCallID(maxOpenCalls) {
+		t.Fatalf("finished calls = %d, want the %d tracked calls only", len(finishes), maxOpenCalls)
+	}
+	for _, id := range finishes {
+		if id == numberedCallID(maxOpenCalls+1) {
+			t.Fatalf("call %s was finished although it never started as a call", id)
+		}
+	}
+}
+
+func TestOpenCallsDoNotSurviveTheTurn(t *testing.T) {
+	first := runToolTurn(t, turnScope{threadID: toolTestThread},
+		toolTurnStarted(),
+		toolItemNotice(methodItemStart, commandItem("call-10", "inProgress", "sleep 1", nil)),
+		toolTurnCompleted(),
+	)
+	if got := kindsOf(first); !equalStrings(got, []string{contracts.BackendKindTool, eventResult}) {
+		t.Fatalf("first turn kinds = %v, want the start then the result", got)
+	}
+	second := runToolTurn(t, turnScope{threadID: toolTestThread},
+		toolTurnStarted(),
+		toolItemNotice(methodItemStart, commandItem("call-10", "inProgress", "sleep 1", nil)),
+		toolItemNotice(methodItemEnd, commandItem("call-10", "completed", "sleep 1", 0)),
+		toolTurnCompleted(),
+	)
+	if call := mustToolCall(t, second[0]); call.ID != "call-10" || call.State != contracts.ToolCallStarted {
+		t.Fatalf("second turn start = %+v, want call-10 started again", call)
+	}
+	if got := kindsOf(second); !equalStrings(got, []string{contracts.BackendKindTool, contracts.BackendKindToolDone, eventResult}) {
+		t.Fatalf("second turn kinds = %v, want the call closed in its own turn", got)
+	}
+}
+
+func TestCompactionRepeatsFollowTheSameRule(t *testing.T) {
+	compaction := map[string]any{fieldID: "c2", fieldType: itemContextCompaction}
+	events := runToolTurn(t, turnScope{threadID: toolTestThread, compaction: true},
+		toolItemNotice(methodItemStart, compaction),
+		toolItemNotice(methodItemStart, compaction),
+		toolItemNotice(methodItemEnd, compaction),
+		toolItemNotice(methodItemEnd, compaction),
+		toolTurnCompleted(),
+	)
+	if got := kindsOf(events); !equalStrings(got, []string{contracts.BackendKindTool, contracts.BackendKindTool, contracts.BackendKindToolDone}) {
+		t.Fatalf("kinds = %v, want one started compaction, a bare tool event, then one finish", got)
+	}
+	if events[1].ToolCall != nil || events[1].Tool != compactionTool {
+		t.Fatalf("repeated compaction start = %+v, want a bare tool event", events[1])
 	}
 }
 
@@ -238,4 +383,8 @@ func equalStrings(got, want []string) bool {
 		}
 	}
 	return true
+}
+
+func numberedCallID(index int) string {
+	return "call-bound-" + strconv.Itoa(index)
 }

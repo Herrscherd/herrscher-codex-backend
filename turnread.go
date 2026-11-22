@@ -33,6 +33,7 @@ type turnCollector struct {
 	result         turnResult
 	deltas         strings.Builder
 	observed       bool
+	calls          callTracker
 }
 
 func readTurn(ctx context.Context, reader *bufio.Reader, scope turnScope, onEvent func(contracts.BackendEvent), approvals *approver, respondHoldingSendLock func(map[string]any) error) (turnResult, error) {
