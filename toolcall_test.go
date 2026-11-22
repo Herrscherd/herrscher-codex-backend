@@ -221,7 +221,8 @@ func TestOpenCallsAreBoundedPerTurn(t *testing.T) {
 	messages = append(messages, toolTurnCompleted())
 	events := runToolTurn(t, turnScope{threadID: toolTestThread}, messages...)
 
-	starts, finishes := startedAndFinishedIDs(t, events)
+	starts := startedIDs(events)
+	finishes := finishedIDs(t, events)
 	if len(starts) != maxOpenCalls || starts[0] != numberedCallID(1) || starts[maxOpenCalls-1] != numberedCallID(maxOpenCalls) {
 		t.Fatalf("started calls = %d, want the first %d only", len(starts), maxOpenCalls)
 	}
@@ -248,7 +249,8 @@ func TestClosedCallFreesItsOpenSlot(t *testing.T) {
 	)
 	events := runToolTurn(t, turnScope{threadID: toolTestThread}, messages...)
 
-	starts, finishes := startedAndFinishedIDs(t, events)
+	starts := startedIDs(events)
+	finishes := finishedIDs(t, events)
 	if len(starts) != maxOpenCalls+1 || starts[maxOpenCalls] != numberedCallID(maxOpenCalls+1) {
 		t.Fatalf("started calls = %d, want the start that follows a closed call to start", len(starts))
 	}
@@ -269,7 +271,8 @@ func TestSeenCallsAreBoundedPerTurn(t *testing.T) {
 	messages = append(messages, toolTurnCompleted())
 	events := runToolTurn(t, turnScope{threadID: toolTestThread}, messages...)
 
-	starts, finishes := startedAndFinishedIDs(t, events)
+	starts := startedIDs(events)
+	finishes := finishedIDs(t, events)
 	if len(starts) != maxSeenCalls || starts[maxSeenCalls-1] != numberedCallID(maxSeenCalls) {
 		t.Fatalf("started calls = %d, want the first %d only", len(starts), maxSeenCalls)
 	}
@@ -295,19 +298,25 @@ func TestStartOfAFinishedCallInTheSameTurnEmitsABareToolEvent(t *testing.T) {
 	}
 }
 
-func startedAndFinishedIDs(t *testing.T, events []contracts.BackendEvent) (starts, finishes []string) {
-	t.Helper()
+func startedIDs(events []contracts.BackendEvent) []string {
+	var starts []string
 	for index := range events {
-		switch events[index].Kind {
-		case contracts.BackendKindTool:
-			if events[index].ToolCall != nil {
-				starts = append(starts, events[index].ToolCall.ID)
-			}
-		case contracts.BackendKindToolDone:
+		if events[index].Kind == contracts.BackendKindTool && events[index].ToolCall != nil {
+			starts = append(starts, events[index].ToolCall.ID)
+		}
+	}
+	return starts
+}
+
+func finishedIDs(t *testing.T, events []contracts.BackendEvent) []string {
+	t.Helper()
+	var finishes []string
+	for index := range events {
+		if events[index].Kind == contracts.BackendKindToolDone {
 			finishes = append(finishes, mustToolCall(t, events[index]).ID)
 		}
 	}
-	return starts, finishes
+	return finishes
 }
 
 func TestOpenCallsDoNotSurviveTheTurn(t *testing.T) {
