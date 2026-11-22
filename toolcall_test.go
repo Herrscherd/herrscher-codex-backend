@@ -340,7 +340,15 @@ func TestEachBoundWarnsOncePerTurn(t *testing.T) {
 
 	for _, bound := range []string{"bound=max_open", "bound=max_seen"} {
 		if count := strings.Count(logs.String(), bound); count != 1 {
-			t.Fatalf("warnings naming %s = %d, want 1 in\n%s", bound, count, logs.String())
+			t.Fatalf("warnings naming %s after one turn = %d, want 1 in\n%s", bound, count, logs.String())
+		}
+	}
+
+	runToolTurn(t, turnScope{threadID: toolTestThread}, messages...)
+
+	for _, bound := range []string{"bound=max_open", "bound=max_seen"} {
+		if count := strings.Count(logs.String(), bound); count != 2 {
+			t.Fatalf("warnings naming %s after two turns = %d, want 2 in\n%s", bound, count, logs.String())
 		}
 	}
 }

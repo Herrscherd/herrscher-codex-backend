@@ -103,9 +103,10 @@ id, and it closes that id: it frees one of the 256 slots, but the id stays seen
 for the rest of the turn. A repeated or unknown finish emits nothing. A call
 still open when the turn ends keeps its start and never gets a finish.
 
-Compaction items follow the same rule. A compaction's finish is always
-`succeeded`, on its `item/completed`, because a `contextCompaction` item carries
-no status: a failed compaction fails the turn, not the call.
+Compaction items follow the same rule, but only inside a compaction operation:
+a `contextCompaction` item in a normal turn is silent. A compaction's finish is
+always `succeeded`, on its `item/completed`, because a `contextCompaction` item
+carries no status: a failed compaction fails the turn, not the call.
 
 ## Approvals
 
@@ -216,7 +217,8 @@ reported as a `tool` event naming the tool call `compaction`, and its
 `succeeded` is deduced from `item/completed`: the schema carries no compaction
 state, so the item does not say whether the compaction worked. A failure shows
 in the turn error instead, which ends the turn with an error. The open-call rule
-of the tool calls section applies to compactions too. Any other item is silent.
+of the tool calls section applies to compactions too. Any other item, and a
+`contextCompaction` item outside a compaction operation, is silent.
 
 The reader stops only on the `turn/completed` of its turn or on the context of
 its caller. An `error` with `willRetry` false followed by no `turn/completed`
