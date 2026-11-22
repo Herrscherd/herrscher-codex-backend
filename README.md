@@ -71,9 +71,9 @@ the same `ID`, with `Tool` and `Detail` left empty on the event:
 - Any other status at the end, such as `inProgress`: the start only, with no
   finish.
 
-A command whose `command` text is empty emits neither a start nor a finish. A
-finish whose item carries no command text is ignored the same way, so its call
-stays open until the turn ends.
+A command whose `command` text is empty emits no start, so its finish finds no
+open call and emits nothing. A finish closes the call its id opened, whether or
+not its item still carries the command text.
 
 `Error` never carries the command output. An item with no id emits its start as a
 `tool` event without a `ToolCall`, and no finish. The protocol has no other item

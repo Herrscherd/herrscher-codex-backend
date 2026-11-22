@@ -144,15 +144,18 @@ func TestCommandWithoutTextEmitsNeitherStartNorFinish(t *testing.T) {
 	}
 }
 
-func TestCommandFinishWithoutTextEmitsNoFinish(t *testing.T) {
+func TestCommandFinishWithoutTextClosesItsOpenCall(t *testing.T) {
 	events := runToolTurn(t, turnScope{threadID: toolTestThread},
 		toolTurnStarted(),
 		toolItemNotice(methodItemStart, commandItem("call-6", "inProgress", "ls", nil)),
 		toolItemNotice(methodItemEnd, commandItem("call-6", "completed", "", 0)),
 		toolTurnCompleted(),
 	)
-	if got := kindsOf(events); !equalStrings(got, []string{contracts.BackendKindTool, eventResult}) {
-		t.Fatalf("kinds = %v, want the start alone before the result", got)
+	if got := kindsOf(events); !equalStrings(got, []string{contracts.BackendKindTool, contracts.BackendKindToolDone, eventResult}) {
+		t.Fatalf("kinds = %v, want the start then its finish before the result", got)
+	}
+	if call := mustToolCall(t, events[1]); call.ID != "call-6" || call.State != contracts.ToolCallSucceeded {
+		t.Fatalf("finish = %+v, want call-6 succeeded", call)
 	}
 }
 

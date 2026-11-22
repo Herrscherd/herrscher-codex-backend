@@ -49,9 +49,6 @@ func (c *turnCollector) startCommand(item map[string]any) {
 }
 
 func (c *turnCollector) finishCommand(item map[string]any) {
-	if stringField(item, fieldCommand) == "" {
-		return
-	}
 	state, reason, finished := commandOutcome(item)
 	if !finished {
 		return
