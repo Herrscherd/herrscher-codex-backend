@@ -57,6 +57,58 @@ runs `on-request` and answers each approval (see [Approvals](#approvals)). Any
 turn parameter instead, because the Codex CLI rejects those flags before
 `app-server`.
 
+## Tool calls
+
+A command execution is a tool call named `command`, its command in `Detail`. Its
+`item/started` is a `tool` event carrying a `started` call whose `ID` is the
+item id. Its `item/completed` is a `tool_done` event carrying the finished call
+under the same `ID`, with `Tool` and `Detail` left empty on the event:
+
+- `completed` with no exit code, or with exit code 0: `succeeded`.
+- `completed` with a non-zero exit code, or `failed`: `failed`, with `Error` set
+  to `exit code N`, or to `command failed` when no non-zero exit code came. An
+  exit code counts only when it is an integer in the int32 range; any other
+  number, such as `0.5` or `1e19`, counts as no exit code.
+- `declined`: `failed`, with `Error` set to `command declined`.
+- Any other status at the end, such as `inProgress`: the start only, with no
+  finish.
+
+A command whose start has an empty `command` text emits no start, so its finish
+finds no open call and emits nothing. A finish closes the call its id opened,
+whether or not its item still carries the command text.
+
+`Error` never carries the command output. An item with no id emits its start as
+a `tool` event without a `ToolCall`, and no finish. The protocol has no other
+item type that this backend reports as a tool call. Every event it emits passes
+`BackendEvent.ValidateToolCall`.
+
+Each turn keeps two sets of ids, dropped when the turn ends, so nothing carries
+over to the next turn or to a reset:
+
+- the open calls, at most 256 at the same time;
+- the seen ids, every id of at most 256 bytes that has started in the turn,
+  whether it opened a call, finished one or was refused by the open bound, at
+  most 4096.
+
+A start opens a call only when its id is not seen yet, the open calls are under
+256, and the seen ids are under 4096. Any other start is emitted as a bare
+`tool` event without a `ToolCall`, and it leaves the open calls untouched. So an
+id finished earlier in the same turn never starts a call again: its repeated
+start is bare, and its finish emits nothing. A start made while 256 calls are
+open is bare too, and its id is seen, so it stays bare for the rest of the turn
+even after a slot frees. Once 4096 ids are seen, every new start is bare. The
+first start refused by each bound in a turn logs one warning, and a turn retried
+after a reset is a new turn. An id longer than 256 bytes never opens a call: its
+start is bare and its finish emits nothing. A finish is emitted only for an open
+id, and it closes that id: it frees one of the 256 slots, but the id stays seen
+for the rest of the turn. A repeated or unknown finish emits nothing. A call
+still open when the turn ends keeps its start and never gets a finish.
+
+Compaction items follow the same rule, but only inside a compaction operation:
+a `contextCompaction` item in a normal turn is silent. A compaction's finish is
+always `succeeded`, on its `item/completed`, because a `contextCompaction` item
+carries no status: a failed compaction fails the turn, not the call.
+
 ## Approvals
 
 A tool call that the agent wants to run is gated in one of two ways, and a turn
@@ -157,12 +209,17 @@ not identify the compaction: a completion of another turn of the thread closes
 the compaction only if it carries that id. A compaction whose id never arrives
 waits for the context of its caller or its ten-minute deadline.
 
-An `error` notification with `willRetry` false is the failure,
-and the reader still waits for the `turn/completed` that follows it, so that
-completion never leaks into the next turn. An `error` with `willRetry` true is
-ignored, because the server retries it. Its start, an `item/started` of a
-`contextCompaction` item, is reported as a `tool` event named `compaction`; any
-other item is silent.
+An `error` notification with `willRetry` false is the failure, and the reader
+still waits for the `turn/completed` that follows it, so that completion never
+leaks into the next turn. An `error` with `willRetry` true is ignored, because
+the server retries it. An `item/started` of a `contextCompaction` item is
+reported as a `tool` event naming the tool call `compaction`, and its
+`item/completed` closes that call as `tool_done` with state `succeeded`. That
+`succeeded` is deduced from `item/completed`: the schema carries no compaction
+state, so the item does not say whether the compaction worked. A failure shows
+in the turn error instead, which ends the turn with an error. The open-call rule
+of the tool calls section applies to compactions too. Any other item, and a
+`contextCompaction` item outside a compaction operation, is silent.
 
 The reader stops only on the `turn/completed` of its turn or on the context of
 its caller. An `error` with `willRetry` false followed by no `turn/completed`
@@ -197,11 +254,14 @@ thread history that the reopened session resumes. The reader cannot remove them,
 so the next turn may read them as context. This limit is not verified against a
 live app-server.
 
-The `oneshot` mode has no session to compact, so its instance does not implement the
-`Compact` port, although the manifest still declares `Capabilities.Compactor`. The host
-therefore attempts a compaction, the instance answers `no_compactor`, and the host
-refuses it: the first refusal logs one warning for the daemon, then each compaction is
-refused without a new warning. `CODEX_COMPACT_TIMEOUT` has no effect in that mode, which includes the Windows fallback (`HERRSCHER_CODEX_ONESHOT_WINDOWS=1`) that serves oneshot even when `CODEX_STREAM=true`.
+The `oneshot` mode has no session to compact, so its instance does not implement
+the `Compact` port, although the manifest still declares
+`Capabilities.Compactor`. The host therefore attempts a compaction, the instance
+answers `no_compactor`, and the host refuses it: the first refusal logs one
+warning for the daemon, then each compaction is refused without a new warning.
+`CODEX_COMPACT_TIMEOUT` has no effect in that mode, which includes the Windows
+fallback (`HERRSCHER_CODEX_ONESHOT_WINDOWS=1`) that serves oneshot even when
+`CODEX_STREAM=true`.
 
 ## Model catalog
 
