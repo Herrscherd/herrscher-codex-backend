@@ -66,9 +66,9 @@ under the same `ID`, with `Tool` and `Detail` left empty on the event:
 
 - `completed` with no exit code, or with exit code 0: `succeeded`.
 - `completed` with a non-zero exit code, or `failed`: `failed`, with `Error` set
-  to `exit code N`, or to `command failed` when no exit code came. An exit code
-  counts only when it is an integer in the int32 range; any other number, such
-  as `0.5` or `1e19`, counts as no exit code.
+  to `exit code N`, or to `command failed` when no non-zero exit code came. An
+  exit code counts only when it is an integer in the int32 range; any other
+  number, such as `0.5` or `1e19`, counts as no exit code.
 - `declined`: `failed`, with `Error` set to `command declined`.
 - Any other status at the end, such as `inProgress`: the start only, with no
   finish.
