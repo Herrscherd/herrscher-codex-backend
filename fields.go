@@ -16,6 +16,7 @@ const (
 	fieldMessage     = "message"
 	fieldWillRetry   = "willRetry"
 	fieldStatus      = "status"
+	fieldExitCode    = "exitCode"
 	fieldDelta       = "delta"
 	fieldInput       = "input"
 	fieldCommand     = "command"
@@ -30,7 +31,9 @@ const (
 	methodItemStart  = "item/started"
 	methodItemEnd    = "item/completed"
 	methodAgentText  = "item/agentMessage/delta"
+	statusCompleted  = "completed"
 	statusFailed     = "failed"
+	statusDeclined   = "declined"
 	contentText      = "text"
 	eventResult      = "result"
 	eventText        = "text"
@@ -45,6 +48,11 @@ func stringField(fields map[string]any, key string) string {
 		return ""
 	}
 	return value
+}
+
+func numberField(fields map[string]any, key string) (float64, bool) {
+	value, ok := fields[key].(float64)
+	return value, ok
 }
 
 func mapField(fields map[string]any, key string) map[string]any {

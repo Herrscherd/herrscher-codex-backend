@@ -279,7 +279,7 @@ func (c *turnCollector) handleAppEvent(msg map[string]any) {
 	case methodItemStart:
 		c.observeStarted(mapField(params, fieldItem))
 	case methodItemEnd:
-		c.observeItem(mapField(params, fieldItem))
+		c.observeCompleted(mapField(params, fieldItem))
 	case methodError:
 		c.observeError(params)
 	}
@@ -296,26 +296,38 @@ func (c *turnCollector) appendDelta(delta string) {
 func (c *turnCollector) observeStarted(item map[string]any) {
 	if c.scope.compaction {
 		if isContextCompactionItem(item) {
-			c.emit(contracts.BackendEvent{Kind: "tool", Tool: compactionTool})
+			c.emitToolStart(item, compactionTool, "")
 		}
+		return
+	}
+	if isCommandItem(item) {
+		c.startCommand(item)
+		return
+	}
+	c.observeItem(item)
+}
+
+func (c *turnCollector) observeCompleted(item map[string]any) {
+	if c.scope.compaction {
+		if isContextCompactionItem(item) {
+			c.emitToolDone(item, compactionTool, contracts.ToolCallSucceeded, "")
+		}
+		return
+	}
+	if isCommandItem(item) {
+		c.finishCommand(item)
 		return
 	}
 	c.observeItem(item)
 }
 
 func (c *turnCollector) observeItem(item map[string]any) {
-	if c.scope.compaction {
+	itemType := stringField(item, fieldType)
+	if itemType != "agentMessage" && itemType != "agent_message" {
 		return
 	}
-	switch stringField(item, fieldType) {
-	case "agentMessage", "agent_message":
-		if v, ok := item[fieldText].(string); ok && v != "" {
-			c.result.Text = v
-		}
-	case "commandExecution", "command_execution":
-		if cmd := stringField(item, fieldCommand); cmd != "" {
-			c.emit(contracts.BackendEvent{Kind: "tool", Tool: toolCommand, Detail: cmd})
-		}
+	if v, ok := item[fieldText].(string); ok && v != "" {
+		c.result.Text = v
 	}
 }
 

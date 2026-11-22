@@ -57,6 +57,25 @@ runs `on-request` and answers each approval (see [Approvals](#approvals)). Any
 turn parameter instead, because the Codex CLI rejects those flags before
 `app-server`.
 
+## Tool calls
+
+A command execution is a tool call named `command`, its command in `Detail`. Its
+`item/started` is a `tool` event carrying a `started` call whose `ID` is the item
+id. Its `item/completed` is a `tool_done` event carrying the finished call under
+the same `ID`, with `Tool` and `Detail` left empty on the event:
+
+- `completed` with no exit code, or with exit code 0: `succeeded`.
+- `completed` with a non-zero exit code, or `failed`: `failed`, with `Error` set
+  to `exit code N`, or to `command failed` when no exit code came.
+- `declined`: `failed`, with `Error` set to `command declined`.
+- Any other status at the end, such as `inProgress`: the start only, with no
+  finish.
+
+`Error` never carries the command output. An item with no id emits its start as a
+`tool` event without a `ToolCall`, and no finish. The protocol has no other item
+type that this backend reports as a tool call. Every event it emits passes
+`BackendEvent.ValidateToolCall`.
+
 ## Approvals
 
 A tool call that the agent wants to run is gated in one of two ways, and a turn
@@ -160,9 +179,11 @@ waits for the context of its caller or its ten-minute deadline.
 An `error` notification with `willRetry` false is the failure,
 and the reader still waits for the `turn/completed` that follows it, so that
 completion never leaks into the next turn. An `error` with `willRetry` true is
-ignored, because the server retries it. Its start, an `item/started` of a
-`contextCompaction` item, is reported as a `tool` event named `compaction`; any
-other item is silent.
+ignored, because the server retries it. An `item/started` of a `contextCompaction`
+item is reported as a `tool` event naming the tool call `compaction`, and its
+`item/completed` closes that call as `tool_done` with state `succeeded`. The
+item carries no failure state: a compaction that fails ends the turn with an
+error instead. Any other item is silent.
 
 The reader stops only on the `turn/completed` of its turn or on the context of
 its caller. An `error` with `willRetry` false followed by no `turn/completed`
