@@ -86,8 +86,9 @@ Each turn keeps two sets of ids, dropped when the turn ends, so nothing carries
 over to the next turn or to a reset:
 
 - the open calls, at most 256 at the same time;
-- the seen ids, every id that has started in the turn, whether it opened a call,
-  finished one or was refused by the open bound, at most 4096.
+- the seen ids, every id of at most 256 bytes that has started in the turn,
+  whether it opened a call, finished one or was refused by the open bound, at
+  most 4096.
 
 A start opens a call only when its id is not seen yet, the open calls are under
 256, and the seen ids are under 4096. Any other start is emitted as a bare
